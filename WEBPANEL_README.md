@@ -335,9 +335,9 @@ Coming soon:
 
 ## 🆘 Support
 
-- **Issues:** https://github.com/Ptechgithub/smartSNI/issues
-- **Discussions:** https://github.com/Ptechgithub/smartSNI/discussions
-- **Documentation:** https://github.com/Ptechgithub/smartSNI
+- **Issues:** https://github.com/feizezadeh/Smart-SNI-Proxy/issues
+- **Discussions:** https://github.com/feizezadeh/Smart-SNI-Proxy/discussions
+- **Documentation:** https://github.com/feizezadeh/Smart-SNI-Proxy
 
 ---
 
