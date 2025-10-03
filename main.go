@@ -1501,8 +1501,8 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 		_ = server.Shutdown()
 	}()
 
-	addr := fmt.Sprintf(":%d", cfg.WebPanelPort)
-	logger.Info("web panel started", "port", cfg.WebPanelPort, "url", fmt.Sprintf("http://localhost:%d/panel", cfg.WebPanelPort))
+	addr := fmt.Sprintf("0.0.0.0:%d", cfg.WebPanelPort)
+	logger.Info("web panel started", "port", cfg.WebPanelPort, "url", fmt.Sprintf("http://0.0.0.0:%d/panel", cfg.WebPanelPort))
 
 	if err := server.ListenAndServe(addr); err != nil {
 		if ctx.Err() == nil {
