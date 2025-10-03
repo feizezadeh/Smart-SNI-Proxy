@@ -94,7 +94,7 @@ A high-performance DNS proxy server with SNI routing, supporting DNS-over-HTTPS 
 ### Auto Install (Recommended)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Ptechgithub/smartSNI/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/feizezadeh/Smart-SNI-Proxy/install.sh)
 ```
 
 ### Manual Installation
@@ -108,8 +108,8 @@ snap install go --classic
 
 2. **Clone Repository**
 ```bash
-git clone https://github.com/Ptechgithub/smartSNI.git /root/smartSNI
-cd /root/smartSNI
+git clone https://github.com/feizezadeh/Smart-SNI-Proxy.git /root/Smart-SNI-Proxy
+cd /root/Smart-SNI-Proxy
 ```
 
 3. **Configure**
@@ -144,7 +144,7 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/root/smartSNI
-ExecStart=/root/smartSNI/smartsni
+ExecStart=/root/Smart-SNI-Proxy/smartsni
 Restart=always
 RestartSec=5
 
