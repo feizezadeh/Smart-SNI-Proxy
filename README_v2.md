@@ -94,7 +94,7 @@ A high-performance DNS proxy server with SNI routing, supporting DNS-over-HTTPS 
 ### Auto Install (Recommended)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/feizezadeh/Smart-SNI-Proxy/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/feizezadeh/Smart-SNI-Proxy/main/install.sh)
 ```
 
 ### Manual Installation
@@ -108,8 +108,8 @@ snap install go --classic
 
 2. **Clone Repository**
 ```bash
-git clone https://github.com/feizezadeh/Smart-SNI-Proxy.git /root/Smart-SNI-Proxy
-cd /root/Smart-SNI-Proxy
+git clone https://github.com/Ptechgithub/smartSNI.git /root/smartSNI
+cd /root/smartSNI
 ```
 
 3. **Configure**
@@ -144,7 +144,7 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/root/smartSNI
-ExecStart=/root/Smart-SNI-Proxy/smartsni
+ExecStart=/root/smartSNI/smartsni
 Restart=always
 RestartSec=5
 
@@ -382,12 +382,12 @@ This project is open-source and available under the [MIT License](LICENSE).
 ## 🙏 Credits
 
 - Original author: [Ptechgithub](https://github.com/Ptechgithub)
-- Enhanced by: Community contributors
+- Enhanced by: [feizezadeh](https://github.com/feizezadeh) & Community contributors
 
 ---
 
 ## 📞 Support
 
 For issues and questions:
-- GitHub Issues: https://github.com/Ptechgithub/smartSNI/issues
-- Discussions: https://github.com/Ptechgithub/smartSNI/discussions
+- GitHub Issues: https://github.com/feizezadeh/Smart-SNI-Proxy/issues
+- Discussions: https://github.com/feizezadeh/Smart-SNI-Proxy/discussions
