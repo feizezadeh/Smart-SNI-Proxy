@@ -102,13 +102,17 @@ install() {
         # Prepare a string with the new domains (with wildcard support)
         new_domains="{"
         for ((i = 0; i < ${#sites[@]}; i++)); do
-            # Add wildcard pattern for better matching
-            new_domains+="\"*.${sites[i]}\": \"$myip\""
+            # Add both exact and wildcard patterns
+            new_domains+="\"${sites[i]}\": \"$myip\", \"*.${sites[i]}\": \"$myip\""
             if [ $i -lt $((${#sites[@]}-1)) ]; then
                 new_domains+=", "
             fi
         done
         new_domains+="}"
+
+        # Generate random password for web panel
+        webpanel_pass=$(openssl rand -hex 16)
+        webpanel_pass_hash=$(echo -n "$webpanel_pass" | sha256sum | awk '{print $1}')
 
         # Create a JSON Object with host, domains and v2.0 settings
         json_content=$(cat <<EOF
@@ -128,7 +132,11 @@ install() {
   "log_level": "info",
   "trusted_proxies": [],
   "blocked_domains": [],
-  "metrics_enabled": true
+  "metrics_enabled": true,
+  "web_panel_enabled": true,
+  "web_panel_username": "admin",
+  "web_panel_password": "$webpanel_pass_hash",
+  "web_panel_port": 8088
 }
 EOF
 )
@@ -205,6 +213,12 @@ EOL
             echo -e "${green}  DoH:  ${cyan}https://$domain/dns-query${rest}"
             echo -e "${green}  DoT:  ${cyan}$domain:853${rest}"
             echo -e "${green}  SNI:  ${cyan}$domain:443${rest}"
+            echo ""
+            echo -e "${cyan}🌐 Web Panel:${rest}"
+            echo -e "${green}  URL:      ${cyan}http://$myip:8088${rest}"
+            echo -e "${green}  Username: ${cyan}admin${rest}"
+            echo -e "${green}  Password: ${cyan}$webpanel_pass${rest}"
+            echo -e "${yellow}  ⚠️  Save this password! It's only shown once.${rest}"
             echo ""
             echo -e "${cyan}📊 Monitoring:${rest}"
             echo -e "${green}  Health: ${cyan}http://127.0.0.1:8080/health${rest}"
@@ -284,16 +298,17 @@ add_sites() {
 
         current_domains=$(jq -r '.domains | keys_unsorted | .[]' "$config_file")
         for site in "${new_sites[@]}"; do
-            # Add wildcard pattern
+            site=$(echo "$site" | xargs)  # Trim whitespace
             site_pattern="*.${site}"
 
-            if [[ ! " ${current_domains[@]} " =~ " $site_pattern " ]]; then
-                jq ".domains += {\"$site_pattern\": \"$myip\"}" "$config_file" > temp_config.json
+            # Add both exact and wildcard patterns
+            if [[ ! " ${current_domains[@]} " =~ " $site " ]]; then
+                jq ".domains += {\"$site\": \"$myip\", \"$site_pattern\": \"$myip\"}" "$config_file" > temp_config.json
                 mv temp_config.json "$config_file"
                 echo -e "${yellow}********************${rest}"
-                echo -e "${green}Domain ${cyan}'$site_pattern'${green} added successfully.${rest}"
+                echo -e "${green}Domains ${cyan}'$site'${green} and ${cyan}'$site_pattern'${green} added successfully.${rest}"
             else
-                echo -e "${yellow}Domain ${cyan}'$site_pattern' already exists.${rest}"
+                echo -e "${yellow}Domain ${cyan}'$site' already exists.${rest}"
             fi
         done
 
