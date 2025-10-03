@@ -1,0 +1,1642 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/miekg/dns"
+	"github.com/valyala/fasthttp"
+	"golang.org/x/time/rate"
+	"io"
+	"log"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+)
+
+// ======================== Globals ========================
+
+var (
+	// Reusable buffer to reduce allocations in io.Copy and reads
+	BufferPool = sync.Pool{
+		New: func() interface{} {
+			// 16KB tends to work well for TLS/DNS framing
+			return make([]byte, 16*1024)
+		},
+	}
+
+	config      atomic.Value // *Config - thread-safe config
+	limiter     *rate.Limiter
+	ipLimiters  sync.Map // map[string]*rate.Limiter - per-IP rate limiting
+	dohURL      = "https://1.1.1.1/dns-query"
+	dohUpstream atomic.Value // []string - multiple upstream servers
+	dohClient   = &http.Client{
+		Timeout: 4 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			IdleConnTimeout:     30 * time.Second,
+			DisableCompression:  false,
+			TLSHandshakeTimeout: 3 * time.Second,
+		},
+	}
+	defaultTTL uint32 = 3600
+	logger     *slog.Logger
+
+	// Metrics
+	metrics = &Metrics{
+		dohQueries:    0,
+		dotQueries:    0,
+		sniConnections: 0,
+		cacheHits:     0,
+		cacheMisses:   0,
+		errors:        0,
+	}
+
+	// DNS Cache
+	dnsCache     sync.Map // map[string]*CacheEntry
+	authTokens   sync.Map // map[string]bool - valid auth tokens
+
+	// Web Panel Sessions
+	webSessions sync.Map // map[string]*Session - session_id -> Session
+)
+
+// ======================== Structs ========================
+
+// Config holds the main configuration
+type Config struct {
+	Host              string            `json:"host"`
+	Domains           map[string]string `json:"domains"` // pattern -> IP (supports exact or "*.example.com")
+	UpstreamDOH       []string          `json:"upstream_doh,omitempty"`
+	AuthTokens        []string          `json:"auth_tokens,omitempty"`
+	EnableAuth        bool              `json:"enable_auth,omitempty"`
+	CacheTTL          int               `json:"cache_ttl,omitempty"`          // seconds
+	RateLimitPerIP    int               `json:"rate_limit_per_ip,omitempty"`  // requests per second
+	RateLimitBurstIP  int               `json:"rate_limit_burst_ip,omitempty"`
+	LogLevel          string            `json:"log_level,omitempty"` // debug, info, warn, error
+	TrustedProxies    []string          `json:"trusted_proxies,omitempty"`
+	BlockedDomains    []string          `json:"blocked_domains,omitempty"`
+	MetricsEnabled    bool              `json:"metrics_enabled,omitempty"`
+	WebPanelEnabled   bool              `json:"web_panel_enabled,omitempty"`
+	WebPanelUsername  string            `json:"web_panel_username,omitempty"`
+	WebPanelPassword  string            `json:"web_panel_password,omitempty"` // SHA256 hash
+	WebPanelPort      int               `json:"web_panel_port,omitempty"`
+}
+
+// Metrics holds runtime statistics
+type Metrics struct {
+	dohQueries     uint64
+	dotQueries     uint64
+	sniConnections uint64
+	cacheHits      uint64
+	cacheMisses    uint64
+	errors         uint64
+	mu             sync.RWMutex
+}
+
+// CacheEntry represents a cached DNS response
+type CacheEntry struct {
+	Response  []byte
+	ExpiresAt time.Time
+	mu        sync.RWMutex
+}
+
+// Session represents a web panel session
+type Session struct {
+	Username  string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	mu        sync.RWMutex
+}
+
+func LoadConfig(filename string) (*Config, error) {
+	var c Config
+	b, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+
+	// Set defaults
+	if len(c.UpstreamDOH) == 0 {
+		c.UpstreamDOH = []string{"https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"}
+	}
+	if c.CacheTTL == 0 {
+		c.CacheTTL = 300 // 5 minutes default
+	}
+	if c.RateLimitPerIP == 0 {
+		c.RateLimitPerIP = 10
+	}
+	if c.RateLimitBurstIP == 0 {
+		c.RateLimitBurstIP = 20
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
+	}
+	if c.WebPanelPort == 0 {
+		c.WebPanelPort = 8088
+	}
+
+	// Validate config
+	if err := validateConfig(&c); err != nil {
+		return nil, fmt.Errorf("config validation failed: %w", err)
+	}
+
+	return &c, nil
+}
+
+func validateConfig(c *Config) error {
+	if c.Host == "" {
+		return errors.New("host cannot be empty")
+	}
+	if len(c.Domains) == 0 {
+		return errors.New("domains cannot be empty")
+	}
+	for pattern, ip := range c.Domains {
+		if pattern == "" {
+			return errors.New("domain pattern cannot be empty")
+		}
+		if net.ParseIP(ip) == nil {
+			return fmt.Errorf("invalid IP address for domain %s: %s", pattern, ip)
+		}
+	}
+	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
+	if !validLevels[c.LogLevel] {
+		return fmt.Errorf("invalid log level: %s", c.LogLevel)
+	}
+	return nil
+}
+
+func getConfig() *Config {
+	return config.Load().(*Config)
+}
+
+func reloadConfig(filename string) error {
+	newConfig, err := LoadConfig(filename)
+	if err != nil {
+		return err
+	}
+
+	config.Store(newConfig)
+
+	// Update upstream servers
+	dohUpstream.Store(newConfig.UpstreamDOH)
+
+	// Update auth tokens
+	authTokens.Range(func(key, value interface{}) bool {
+		authTokens.Delete(key)
+		return true
+	})
+	for _, token := range newConfig.AuthTokens {
+		authTokens.Store(token, true)
+	}
+
+	logger.Info("configuration reloaded successfully")
+	return nil
+}
+
+// ======================== Utilities ========================
+
+func initLogger(level string) *slog.Logger {
+	var logLevel slog.Level
+	switch level {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: logLevel,
+	}
+	handler := slog.NewJSONHandler(os.Stdout, opts)
+	return slog.New(handler)
+}
+
+func isIPv4(ip net.IP) bool { return ip.To4() != nil }
+
+func trimDot(s string) string { return strings.TrimSuffix(s, ".") }
+
+func countDots(s string) int { return strings.Count(s, ".") }
+
+func getClientIP(ctx *fasthttp.RequestCtx) string {
+	// Check X-Forwarded-For header
+	xff := string(ctx.Request.Header.Peek("X-Forwarded-For"))
+	if xff != "" {
+		ips := strings.Split(xff, ",")
+		return strings.TrimSpace(ips[0])
+	}
+	// Check X-Real-IP header
+	xri := string(ctx.Request.Header.Peek("X-Real-IP"))
+	if xri != "" {
+		return xri
+	}
+	return ctx.RemoteIP().String()
+}
+
+func getIPLimiter(ip string) *rate.Limiter {
+	cfg := getConfig()
+	val, exists := ipLimiters.Load(ip)
+	if !exists {
+		limiter := rate.NewLimiter(rate.Limit(cfg.RateLimitPerIP), cfg.RateLimitBurstIP)
+		ipLimiters.Store(ip, limiter)
+		return limiter
+	}
+	return val.(*rate.Limiter)
+}
+
+func checkAuth(ctx *fasthttp.RequestCtx) bool {
+	cfg := getConfig()
+	if !cfg.EnableAuth {
+		return true
+	}
+
+	authHeader := string(ctx.Request.Header.Peek("Authorization"))
+	if authHeader == "" {
+		return false
+	}
+
+	// Support Bearer token
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		_, exists := authTokens.Load(token)
+		return exists
+	}
+
+	return false
+}
+
+func isDomainBlocked(domain string) bool {
+	cfg := getConfig()
+	for _, blocked := range cfg.BlockedDomains {
+		if matches(domain, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
+// ======================== Web Panel Auth ========================
+
+func hashPassword(password string) string {
+	hash := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(hash[:])
+}
+
+func generateSessionID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func createSession(username string) (string, error) {
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return "", err
+	}
+
+	session := &Session{
+		Username:  username,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+
+	webSessions.Store(sessionID, session)
+	logger.Info("session created", "username", username, "session_id", sessionID[:16]+"...")
+
+	return sessionID, nil
+}
+
+func validateSession(sessionID string) (*Session, bool) {
+	val, exists := webSessions.Load(sessionID)
+	if !exists {
+		return nil, false
+	}
+
+	session := val.(*Session)
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+
+	if time.Now().After(session.ExpiresAt) {
+		webSessions.Delete(sessionID)
+		return nil, false
+	}
+
+	return session, true
+}
+
+func deleteSession(sessionID string) {
+	webSessions.Delete(sessionID)
+	logger.Info("session deleted", "session_id", sessionID[:16]+"...")
+}
+
+func cleanExpiredSessions() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		webSessions.Range(func(key, value interface{}) bool {
+			session := value.(*Session)
+			session.mu.RLock()
+			expired := now.After(session.ExpiresAt)
+			session.mu.RUnlock()
+
+			if expired {
+				webSessions.Delete(key)
+				logger.Debug("removed expired session", "session_id", key.(string)[:16]+"...")
+			}
+			return true
+		})
+	}
+}
+
+func checkWebPanelAuth(username, password string) bool {
+	cfg := getConfig()
+
+	if !cfg.WebPanelEnabled {
+		return false
+	}
+
+	if cfg.WebPanelUsername == "" || cfg.WebPanelPassword == "" {
+		return false
+	}
+
+	hashedPassword := hashPassword(password)
+	return username == cfg.WebPanelUsername && hashedPassword == cfg.WebPanelPassword
+}
+
+// Domain matcher with wildcard support: "*.example.com"
+func matches(host, pattern string) bool {
+	h := strings.ToLower(trimDot(host))
+	p := strings.ToLower(trimDot(pattern))
+	if p == "" {
+		return false
+	}
+	if strings.HasPrefix(p, "*.") {
+		suf := p[1:] // ".example.com"
+		// require suffix match and at least as many labels as the pattern
+		return strings.HasSuffix(h, suf) && countDots(h) >= countDots(p)
+	}
+	return h == p
+}
+
+func findValueByPattern(m map[string]string, host string) (string, bool) {
+	for k, v := range m {
+		if matches(host, k) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// ======================== Metrics ========================
+
+func (m *Metrics) IncDOHQueries() {
+	atomic.AddUint64(&m.dohQueries, 1)
+}
+
+func (m *Metrics) IncDOTQueries() {
+	atomic.AddUint64(&m.dotQueries, 1)
+}
+
+func (m *Metrics) IncSNIConnections() {
+	atomic.AddUint64(&m.sniConnections, 1)
+}
+
+func (m *Metrics) IncCacheHits() {
+	atomic.AddUint64(&m.cacheHits, 1)
+}
+
+func (m *Metrics) IncCacheMisses() {
+	atomic.AddUint64(&m.cacheMisses, 1)
+}
+
+func (m *Metrics) IncErrors() {
+	atomic.AddUint64(&m.errors, 1)
+}
+
+func (m *Metrics) GetStats() map[string]uint64 {
+	return map[string]uint64{
+		"doh_queries":     atomic.LoadUint64(&m.dohQueries),
+		"dot_queries":     atomic.LoadUint64(&m.dotQueries),
+		"sni_connections": atomic.LoadUint64(&m.sniConnections),
+		"cache_hits":      atomic.LoadUint64(&m.cacheHits),
+		"cache_misses":    atomic.LoadUint64(&m.cacheMisses),
+		"errors":          atomic.LoadUint64(&m.errors),
+	}
+}
+
+// ======================== DNS Cache ========================
+
+func getCacheKey(query []byte) string {
+	return base64.StdEncoding.EncodeToString(query)
+}
+
+func getCachedResponse(query []byte) ([]byte, bool) {
+	key := getCacheKey(query)
+	val, exists := dnsCache.Load(key)
+	if !exists {
+		metrics.IncCacheMisses()
+		return nil, false
+	}
+
+	entry := val.(*CacheEntry)
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
+
+	if time.Now().After(entry.ExpiresAt) {
+		dnsCache.Delete(key)
+		metrics.IncCacheMisses()
+		return nil, false
+	}
+
+	metrics.IncCacheHits()
+	logger.Debug("cache hit", "key", key[:20]+"...")
+	return entry.Response, true
+}
+
+func setCachedResponse(query, response []byte) {
+	cfg := getConfig()
+	if cfg.CacheTTL <= 0 {
+		return
+	}
+
+	key := getCacheKey(query)
+	entry := &CacheEntry{
+		Response:  response,
+		ExpiresAt: time.Now().Add(time.Duration(cfg.CacheTTL) * time.Second),
+	}
+
+	dnsCache.Store(key, entry)
+	logger.Debug("cached response", "key", key[:20]+"...", "ttl", cfg.CacheTTL)
+}
+
+func cleanExpiredCache() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		dnsCache.Range(func(key, value interface{}) bool {
+			entry := value.(*CacheEntry)
+			entry.mu.RLock()
+			expired := now.After(entry.ExpiresAt)
+			entry.mu.RUnlock()
+
+			if expired {
+				dnsCache.Delete(key)
+				logger.Debug("removed expired cache entry", "key", key.(string)[:20]+"...")
+			}
+			return true
+		})
+	}
+}
+
+// ======================== DNS Handling ========================
+
+func buildLocalDNSResponse(req *dns.Msg, ipStr string) ([]byte, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP address: %s", ipStr)
+	}
+
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.RecursionAvailable = true
+	resp.Compress = true
+
+	q := req.Question[0]
+	name := q.Name
+
+	// Answer only if the type matches the IP version.
+	switch q.Qtype {
+	case dns.TypeA:
+		if ip4 := ip.To4(); ip4 != nil {
+			resp.Answer = append(resp.Answer, &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    defaultTTL,
+				},
+				A: ip4,
+			})
+		}
+	case dns.TypeAAAA:
+		if ip16 := ip.To16(); ip16 != nil && ip.To4() == nil {
+			resp.Answer = append(resp.Answer, &dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   name,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassINET,
+					Ttl:    defaultTTL,
+				},
+				AAAA: ip16,
+			})
+		}
+	case dns.TypeANY:
+		// Return whichever record matches the IP family
+		if ip4 := ip.To4(); ip4 != nil {
+			resp.Answer = append(resp.Answer, &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    defaultTTL,
+				},
+				A: ip4,
+			})
+		} else if ip16 := ip.To16(); ip16 != nil {
+			resp.Answer = append(resp.Answer, &dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   name,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassINET,
+					Ttl:    defaultTTL,
+				},
+				AAAA: ip16,
+			})
+		}
+	default:
+		// NOERROR / NODATA for other types
+	}
+
+	return resp.Pack()
+}
+
+func processDNSQuery(query []byte) ([]byte, error) {
+	var req dns.Msg
+	if err := req.Unpack(query); err != nil {
+		logger.Warn("failed to unpack DNS query", "error", err)
+		return nil, err
+	}
+	if len(req.Question) == 0 {
+		return nil, errors.New("no DNS question")
+	}
+
+	qName := trimDot(req.Question[0].Name)
+	qType := req.Question[0].Qtype
+
+	logger.Debug("processing DNS query", "domain", qName, "type", dns.TypeToString[qType])
+
+	// Check if domain is blocked
+	if isDomainBlocked(qName) {
+		logger.Info("blocked domain query", "domain", qName)
+		metrics.IncErrors()
+		return buildBlockedResponse(&req)
+	}
+
+	// Check cache first
+	if cached, found := getCachedResponse(query); found {
+		logger.Debug("returning cached response", "domain", qName)
+		return cached, nil
+	}
+
+	// Check local domains
+	cfg := getConfig()
+	if ip, ok := findValueByPattern(cfg.Domains, qName); ok {
+		logger.Debug("local domain match", "domain", qName, "ip", ip)
+		resp, err := buildLocalDNSResponse(&req, ip)
+		if err == nil {
+			setCachedResponse(query, resp)
+		}
+		return resp, err
+	}
+
+	// Forward to upstream DoH with failover
+	upstreams := dohUpstream.Load().([]string)
+	var lastErr error
+
+	for _, upstream := range upstreams {
+		resp, err := queryUpstreamDoH(upstream, query)
+		if err == nil {
+			setCachedResponse(query, resp)
+			logger.Debug("upstream query success", "domain", qName, "upstream", upstream)
+			return resp, nil
+		}
+		logger.Warn("upstream query failed", "domain", qName, "upstream", upstream, "error", err)
+		lastErr = err
+	}
+
+	metrics.IncErrors()
+	return nil, fmt.Errorf("all upstream servers failed, last error: %w", lastErr)
+}
+
+func queryUpstreamDoH(upstream string, query []byte) ([]byte, error) {
+	httpReq, err := http.NewRequest("POST", upstream, bytes.NewReader(query))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/dns-message")
+	httpReq.Header.Set("Accept", "application/dns-message")
+	httpReq.Header.Set("User-Agent", "smartSNI/2.0")
+
+	resp, err := dohClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("upstream status %d: %s", resp.StatusCode, string(slurp))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func buildBlockedResponse(req *dns.Msg) ([]byte, error) {
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.RecursionAvailable = true
+	resp.Rcode = dns.RcodeRefused
+	return resp.Pack()
+}
+
+// ======================== DoT Server ========================
+
+func handleDoTConnection(conn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("panic in DoT handler", "error", r, "stack", string(debug.Stack()))
+			metrics.IncErrors()
+		}
+		conn.Close()
+	}()
+
+	metrics.IncDOTQueries()
+	clientAddr := conn.RemoteAddr().String()
+
+	logger.Debug("DoT connection", "client", clientAddr)
+
+	if !limiter.Allow() {
+		logger.Warn("DoT global rate limit exceeded", "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	// Set read deadline
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		logger.Error("DoT set read deadline failed", "error", err)
+		return
+	}
+
+	// DoT framing: 2-byte length + DNS payload (RFC 7858 uses TCP DNS framing)
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		logger.Debug("DoT read length failed", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	dnsLen := binary.BigEndian.Uint16(header)
+	// Basic sanity limit to avoid huge allocations
+	if dnsLen == 0 || dnsLen > 8192 {
+		logger.Warn("DoT invalid length", "length", dnsLen, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	buf := make([]byte, int(dnsLen))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		logger.Debug("DoT read body failed", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	resp, err := processDNSQuery(buf)
+	if err != nil {
+		logger.Warn("DoT query processing failed", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	// Set write deadline
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		logger.Error("DoT set write deadline failed", "error", err)
+		return
+	}
+
+	outLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(outLen, uint16(len(resp)))
+	if _, err := conn.Write(outLen); err != nil {
+		logger.Debug("DoT write length failed", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+	if _, err := conn.Write(resp); err != nil {
+		logger.Debug("DoT write body failed", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	logger.Debug("DoT query completed successfully", "client", clientAddr)
+}
+
+func startDoTServer(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	cfg := getConfig()
+	certDir := filepath.Join("/etc/letsencrypt/live", cfg.Host)
+	cer, err := tls.LoadX509KeyPair(
+		filepath.Join(certDir, "fullchain.pem"),
+		filepath.Join(certDir, "privkey.pem"),
+	)
+	if err != nil {
+		logger.Error("DoT: failed to load certificate", "error", err)
+		log.Fatal("DoT: load cert:", err)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cer},
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+		},
+		PreferServerCipherSuites: true,
+	}
+
+	ln, err := tls.Listen("tcp", ":853", tlsCfg)
+	if err != nil {
+		logger.Error("DoT: failed to listen", "error", err)
+		log.Fatal("DoT: listen:", err)
+	}
+	logger.Info("DoT server started", "port", 853)
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("DoT server shutting down")
+		_ = ln.Close()
+	}()
+
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Warn("DoT accept error", "error", err)
+			continue
+		}
+		go handleDoTConnection(c)
+	}
+}
+
+// ======================== TLS SNI Peek ========================
+
+type readOnlyConn struct{ r io.Reader }
+
+func (c readOnlyConn) Read(p []byte) (int, error)       { return c.r.Read(p) }
+func (c readOnlyConn) Write(_ []byte) (int, error)      { return 0, io.ErrClosedPipe }
+func (c readOnlyConn) Close() error                     { return nil }
+func (c readOnlyConn) LocalAddr() net.Addr              { return nil }
+func (c readOnlyConn) RemoteAddr() net.Addr             { return nil }
+func (c readOnlyConn) SetDeadline(time.Time) error      { return nil }
+func (c readOnlyConn) SetReadDeadline(time.Time) error  { return nil }
+func (c readOnlyConn) SetWriteDeadline(time.Time) error { return nil }
+
+// Perform a TLS handshake only to capture ClientHello (SNI), then abort
+func readClientHello(reader io.Reader) (*tls.ClientHelloInfo, error) {
+	helloCh := make(chan *tls.ClientHelloInfo, 1)
+
+	cfg := &tls.Config{
+		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			select {
+			case helloCh <- chi:
+			default:
+			}
+			// Returning nil causes handshake to fail fast; we only need the Hello
+			return nil, nil
+		},
+	}
+
+	t := tls.Server(readOnlyConn{r: reader}, cfg)
+	_ = t.Handshake() // expected to error; we just want ClientHello
+
+	select {
+	case h := <-helloCh:
+		return h, nil
+	default:
+		return nil, errors.New("failed to capture ClientHello")
+	}
+}
+
+func peekClientHello(reader io.Reader) (*tls.ClientHelloInfo, io.Reader, error) {
+	peekBuf := new(bytes.Buffer)
+	hello, err := readClientHello(io.TeeReader(reader, peekBuf))
+	if err != nil {
+		return nil, nil, err
+	}
+	return hello, peekBuf, nil
+}
+
+// ======================== TCP Proxy (SNI) ========================
+
+func closeWrite(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	}
+}
+
+func copyWithPool(dst, src net.Conn) {
+	buf := BufferPool.Get().([]byte)
+	defer BufferPool.Put(buf)
+	_, _ = io.CopyBuffer(dst, src, buf)
+	closeWrite(dst)
+}
+
+func handleConnection(clientConn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("panic in SNI handler", "error", r, "stack", string(debug.Stack()))
+			metrics.IncErrors()
+		}
+		clientConn.Close()
+	}()
+
+	metrics.IncSNIConnections()
+	clientAddr := clientConn.RemoteAddr().String()
+
+	logger.Debug("SNI connection", "client", clientAddr)
+
+	// Deadline only for initial ClientHello capture
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	clientHello, clientHelloBytes, err := peekClientHello(clientConn)
+	if err != nil {
+		logger.Debug("SNI peek failed", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+	_ = clientConn.SetReadDeadline(time.Time{}) // clear deadline
+
+	sni := strings.TrimSpace(strings.ToLower(clientHello.ServerName))
+	if sni == "" {
+		logger.Warn("SNI missing from ClientHello", "client", clientAddr)
+		metrics.IncErrors()
+		// Meaningful HTTP error for non-TLS/empty SNI traffic
+		resp := "HTTP/1.1 421 Misdirected Request\r\n" +
+			"Content-Type: text/plain; charset=utf-8\r\n" +
+			"Connection: close\r\n" +
+			"Content-Length: 12\r\n\r\nSNI required"
+		_, _ = clientConn.Write([]byte(resp))
+		return
+	}
+
+	logger.Debug("SNI detected", "sni", sni, "client", clientAddr)
+
+	cfg := getConfig()
+	target := sni
+	if target == strings.ToLower(cfg.Host) {
+		target = "127.0.0.1:8443"
+		logger.Debug("routing to local HTTPS", "sni", sni)
+	} else {
+		target = net.JoinHostPort(target, "443")
+	}
+
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	backendConn, err := dialer.Dial("tcp", target)
+	if err != nil {
+		logger.Warn("backend dial failed", "target", target, "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+	defer backendConn.Close()
+
+	// Replay the captured ClientHello to the backend first
+	if _, err := io.Copy(backendConn, clientHelloBytes); err != nil {
+		logger.Debug("failed to write ClientHello", "error", err, "client", clientAddr)
+		metrics.IncErrors()
+		return
+	}
+
+	logger.Debug("proxying connection", "sni", sni, "target", target, "client", clientAddr)
+
+	// Bidirectional relay
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		copyWithPool(clientConn, backendConn) // backend -> client
+	}()
+	go func() {
+		defer wg.Done()
+		copyWithPool(backendConn, clientConn) // client -> backend
+	}()
+
+	wg.Wait()
+	logger.Debug("SNI connection closed", "sni", sni, "client", clientAddr)
+}
+
+func serveSniProxy(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	ln, err := net.Listen("tcp", ":443")
+	if err != nil {
+		logger.Error("SNI: failed to listen", "error", err)
+		log.Fatal("SNI: listen:", err)
+	}
+	logger.Info("SNI proxy started", "port", 443)
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("SNI proxy shutting down")
+		_ = ln.Close()
+	}()
+
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Warn("SNI accept error", "error", err)
+			continue
+		}
+		go handleConnection(c)
+	}
+}
+
+// ======================== DoH Server (fasthttp) ========================
+
+func handleDoHRequest(ctx *fasthttp.RequestCtx) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("panic in DoH handler", "error", r, "stack", string(debug.Stack()))
+			metrics.IncErrors()
+			ctx.Error("Internal server error", fasthttp.StatusInternalServerError)
+		}
+	}()
+
+	metrics.IncDOHQueries()
+	clientIP := getClientIP(ctx)
+
+	logger.Debug("DoH request", "client", clientIP, "method", string(ctx.Method()))
+
+	// Check authentication
+	if !checkAuth(ctx) {
+		logger.Warn("DoH authentication failed", "client", clientIP)
+		metrics.IncErrors()
+		ctx.Error("Unauthorized", fasthttp.StatusUnauthorized)
+		return
+	}
+
+	// Global rate limit
+	if !limiter.Allow() {
+		logger.Warn("DoH global rate limit exceeded", "client", clientIP)
+		metrics.IncErrors()
+		ctx.Error("Rate limit exceeded", fasthttp.StatusTooManyRequests)
+		return
+	}
+
+	// Per-IP rate limit
+	ipLimiter := getIPLimiter(clientIP)
+	if !ipLimiter.Allow() {
+		logger.Warn("DoH per-IP rate limit exceeded", "client", clientIP)
+		metrics.IncErrors()
+		ctx.Error("Rate limit exceeded", fasthttp.StatusTooManyRequests)
+		return
+	}
+
+	var body []byte
+	switch string(ctx.Method()) {
+	case "GET":
+		raw := ctx.QueryArgs().Peek("dns")
+		if raw == nil {
+			logger.Debug("DoH missing dns parameter", "client", clientIP)
+			ctx.Error("Missing 'dns' query parameter", fasthttp.StatusBadRequest)
+			return
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(string(raw))
+		if err != nil {
+			logger.Warn("DoH invalid dns parameter", "client", clientIP, "error", err)
+			metrics.IncErrors()
+			ctx.Error("Invalid 'dns' query parameter", fasthttp.StatusBadRequest)
+			return
+		}
+		body = decoded
+	case "POST":
+		body = ctx.PostBody()
+		if len(body) == 0 {
+			logger.Debug("DoH empty request body", "client", clientIP)
+			ctx.Error("Empty request body", fasthttp.StatusBadRequest)
+			return
+		}
+	default:
+		logger.Debug("DoH invalid method", "client", clientIP, "method", string(ctx.Method()))
+		ctx.Error("Only GET and POST methods are allowed", fasthttp.StatusMethodNotAllowed)
+		return
+	}
+
+	// Validate DNS query size
+	if len(body) > 4096 {
+		logger.Warn("DoH query too large", "client", clientIP, "size", len(body))
+		metrics.IncErrors()
+		ctx.Error("DNS query too large", fasthttp.StatusRequestEntityTooLarge)
+		return
+	}
+
+	resp, err := processDNSQuery(body)
+	if err != nil {
+		logger.Warn("DoH query processing failed", "client", clientIP, "error", err)
+		metrics.IncErrors()
+		ctx.Error("Failed to process DNS query", fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Security headers
+	ctx.Response.Header.Set("X-Content-Type-Options", "nosniff")
+	ctx.Response.Header.Set("X-Frame-Options", "DENY")
+	ctx.Response.Header.Set("X-XSS-Protection", "1; mode=block")
+	ctx.Response.Header.Set("Referrer-Policy", "no-referrer")
+
+	ctx.SetContentType("application/dns-message")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(resp)
+
+	logger.Debug("DoH query completed", "client", clientIP)
+}
+
+func handleHealthCheck(ctx *fasthttp.RequestCtx) {
+	health := map[string]interface{}{
+		"status": "healthy",
+		"uptime": time.Since(startTime).Seconds(),
+		"version": "2.0",
+	}
+
+	data, _ := json.Marshal(health)
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(data)
+}
+
+func handleMetrics(ctx *fasthttp.RequestCtx) {
+	cfg := getConfig()
+	if !cfg.MetricsEnabled {
+		ctx.Error("Metrics disabled", fasthttp.StatusForbidden)
+		return
+	}
+
+	stats := metrics.GetStats()
+	data, _ := json.Marshal(stats)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(data)
+}
+
+func handlePrometheusMetrics(ctx *fasthttp.RequestCtx) {
+	cfg := getConfig()
+	if !cfg.MetricsEnabled {
+		ctx.Error("Metrics disabled", fasthttp.StatusForbidden)
+		return
+	}
+
+	stats := metrics.GetStats()
+	var sb strings.Builder
+
+	sb.WriteString("# HELP smartsni_doh_queries_total Total number of DoH queries\n")
+	sb.WriteString("# TYPE smartsni_doh_queries_total counter\n")
+	sb.WriteString(fmt.Sprintf("smartsni_doh_queries_total %d\n", stats["doh_queries"]))
+
+	sb.WriteString("# HELP smartsni_dot_queries_total Total number of DoT queries\n")
+	sb.WriteString("# TYPE smartsni_dot_queries_total counter\n")
+	sb.WriteString(fmt.Sprintf("smartsni_dot_queries_total %d\n", stats["dot_queries"]))
+
+	sb.WriteString("# HELP smartsni_sni_connections_total Total number of SNI connections\n")
+	sb.WriteString("# TYPE smartsni_sni_connections_total counter\n")
+	sb.WriteString(fmt.Sprintf("smartsni_sni_connections_total %d\n", stats["sni_connections"]))
+
+	sb.WriteString("# HELP smartsni_cache_hits_total Total number of cache hits\n")
+	sb.WriteString("# TYPE smartsni_cache_hits_total counter\n")
+	sb.WriteString(fmt.Sprintf("smartsni_cache_hits_total %d\n", stats["cache_hits"]))
+
+	sb.WriteString("# HELP smartsni_cache_misses_total Total number of cache misses\n")
+	sb.WriteString("# TYPE smartsni_cache_misses_total counter\n")
+	sb.WriteString(fmt.Sprintf("smartsni_cache_misses_total %d\n", stats["cache_misses"]))
+
+	sb.WriteString("# HELP smartsni_errors_total Total number of errors\n")
+	sb.WriteString("# TYPE smartsni_errors_total counter\n")
+	sb.WriteString(fmt.Sprintf("smartsni_errors_total %d\n", stats["errors"]))
+
+	ctx.SetContentType("text/plain; version=0.0.4")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(sb.String())
+}
+
+func handleConfigReload(ctx *fasthttp.RequestCtx) {
+	// Simple auth check
+	if !checkAuth(ctx) {
+		ctx.Error("Unauthorized", fasthttp.StatusUnauthorized)
+		return
+	}
+
+	if err := reloadConfig("config.json"); err != nil {
+		logger.Error("failed to reload config", "error", err)
+		ctx.Error(fmt.Sprintf("Failed to reload: %v", err), fasthttp.StatusInternalServerError)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"status":"reloaded"}`)
+}
+
+var startTime = time.Now()
+
+// ======================== Web Panel Handlers ========================
+
+func serveWebPanel(ctx *fasthttp.RequestCtx) {
+	htmlContent, err := os.ReadFile("webpanel.html")
+	if err != nil {
+		ctx.Error("Web panel not found", fasthttp.StatusNotFound)
+		return
+	}
+
+	ctx.SetContentType("text/html; charset=utf-8")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(htmlContent)
+}
+
+func handlePanelLogin(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid request"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if !checkWebPanelAuth(req.Username, req.Password) {
+		logger.Warn("web panel login failed", "username", req.Username, "ip", ctx.RemoteIP().String())
+		ctx.SetStatusCode(fasthttp.StatusUnauthorized)
+		_, _ = ctx.WriteString(`{"error":"Invalid credentials"}`)
+		return
+	}
+
+	sessionID, err := createSession(req.Username)
+	if err != nil {
+		ctx.Error(`{"error":"Failed to create session"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("web panel login successful", "username", req.Username)
+
+	resp, _ := json.Marshal(map[string]string{
+		"session_id": sessionID,
+		"username":   req.Username,
+	})
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(resp)
+}
+
+func handlePanelLogout(ctx *fasthttp.RequestCtx) {
+	sessionID := string(ctx.Request.Header.Peek("X-Session-ID"))
+	if sessionID != "" {
+		deleteSession(sessionID)
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"status":"logged_out"}`)
+}
+
+func handlePanelValidate(ctx *fasthttp.RequestCtx) {
+	sessionID := string(ctx.Request.Header.Peek("X-Session-ID"))
+	session, valid := validateSession(sessionID)
+
+	if !valid {
+		ctx.SetStatusCode(fasthttp.StatusUnauthorized)
+		_, _ = ctx.WriteString(`{"error":"Invalid session"}`)
+		return
+	}
+
+	resp, _ := json.Marshal(map[string]string{
+		"username": session.Username,
+	})
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(resp)
+}
+
+func requirePanelAuth(ctx *fasthttp.RequestCtx) bool {
+	sessionID := string(ctx.Request.Header.Peek("X-Session-ID"))
+	_, valid := validateSession(sessionID)
+
+	if !valid {
+		ctx.SetStatusCode(fasthttp.StatusUnauthorized)
+		_, _ = ctx.WriteString(`{"error":"Unauthorized"}`)
+		return false
+	}
+
+	return true
+}
+
+func handlePanelMetrics(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	stats := metrics.GetStats()
+	data, _ := json.Marshal(stats)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(data)
+}
+
+func handlePanelHealth(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	health := map[string]interface{}{
+		"status":  "healthy",
+		"uptime":  time.Since(startTime).Seconds(),
+		"version": "2.0",
+	}
+
+	data, _ := json.Marshal(health)
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(data)
+}
+
+func handlePanelDomains(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	cfg := getConfig()
+	resp, _ := json.Marshal(map[string]interface{}{
+		"domains": cfg.Domains,
+		"host":    cfg.Host,
+	})
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(resp)
+}
+
+func handlePanelAddDomain(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		Domain string `json:"domain"`
+		IP     string `json:"ip"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid request"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Validate IP
+	if net.ParseIP(req.IP) == nil {
+		ctx.Error(`{"error":"Invalid IP address"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Add wildcard if not present
+	domain := req.Domain
+	if !strings.HasPrefix(domain, "*.") && !strings.Contains(domain, "*") {
+		domain = "*." + domain
+	}
+
+	// Read current config
+	cfg, err := LoadConfig("config.json")
+	if err != nil {
+		ctx.Error(`{"error":"Failed to load config"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Add domain
+	cfg.Domains[domain] = req.IP
+
+	// Save config
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile("config.json", data, 0644); err != nil {
+		ctx.Error(`{"error":"Failed to save config"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Reload config
+	if err := reloadConfig("config.json"); err != nil {
+		logger.Error("failed to reload after adding domain", "error", err)
+	}
+
+	logger.Info("domain added via web panel", "domain", domain, "ip", req.IP)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"status":"added"}`)
+}
+
+func handlePanelRemoveDomain(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		Domain string `json:"domain"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid request"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Read current config
+	cfg, err := LoadConfig("config.json")
+	if err != nil {
+		ctx.Error(`{"error":"Failed to load config"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Remove domain
+	delete(cfg.Domains, req.Domain)
+
+	// Save config
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile("config.json", data, 0644); err != nil {
+		ctx.Error(`{"error":"Failed to save config"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Reload config
+	if err := reloadConfig("config.json"); err != nil {
+		logger.Error("failed to reload after removing domain", "error", err)
+	}
+
+	logger.Info("domain removed via web panel", "domain", req.Domain)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"status":"removed"}`)
+}
+
+func handlePanelReload(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	if err := reloadConfig("config.json"); err != nil {
+		logger.Error("failed to reload config via panel", "error", err)
+		ctx.Error(`{"error":"Failed to reload"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("config reloaded via web panel")
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"status":"reloaded"}`)
+}
+
+func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	cfg := getConfig()
+	if !cfg.WebPanelEnabled {
+		logger.Info("web panel is disabled")
+		return
+	}
+
+	if cfg.WebPanelUsername == "" || cfg.WebPanelPassword == "" {
+		logger.Warn("web panel enabled but no credentials configured")
+		return
+	}
+
+	server := &fasthttp.Server{
+		Handler: func(c *fasthttp.RequestCtx) {
+			path := string(c.Path())
+
+			// CORS headers
+			c.Response.Header.Set("Access-Control-Allow-Origin", "*")
+			c.Response.Header.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			c.Response.Header.Set("Access-Control-Allow-Headers", "Content-Type, X-Session-ID")
+
+			if string(c.Method()) == "OPTIONS" {
+				c.SetStatusCode(fasthttp.StatusOK)
+				return
+			}
+
+			switch path {
+			case "/panel", "/panel/":
+				serveWebPanel(c)
+			case "/panel/api/login":
+				handlePanelLogin(c)
+			case "/panel/api/logout":
+				handlePanelLogout(c)
+			case "/panel/api/validate":
+				handlePanelValidate(c)
+			case "/panel/api/metrics":
+				handlePanelMetrics(c)
+			case "/panel/api/health":
+				handlePanelHealth(c)
+			case "/panel/api/domains":
+				handlePanelDomains(c)
+			case "/panel/api/domains/add":
+				handlePanelAddDomain(c)
+			case "/panel/api/domains/remove":
+				handlePanelRemoveDomain(c)
+			case "/panel/api/reload":
+				handlePanelReload(c)
+			default:
+				c.Error("Not found", fasthttp.StatusNotFound)
+			}
+		},
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("web panel shutting down")
+		_ = server.Shutdown()
+	}()
+
+	addr := fmt.Sprintf(":%d", cfg.WebPanelPort)
+	logger.Info("web panel started", "port", cfg.WebPanelPort, "url", fmt.Sprintf("http://localhost:%d/panel", cfg.WebPanelPort))
+
+	if err := server.ListenAndServe(addr); err != nil {
+		if ctx.Err() == nil {
+			logger.Error("web panel server error", "error", err)
+		}
+	}
+}
+
+func runDOHServer(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	server := &fasthttp.Server{
+		Handler: func(c *fasthttp.RequestCtx) {
+			path := string(c.Path())
+			switch path {
+			case "/dns-query":
+				handleDoHRequest(c)
+			case "/health":
+				handleHealthCheck(c)
+			case "/metrics":
+				handleMetrics(c)
+			case "/metrics/prometheus":
+				handlePrometheusMetrics(c)
+			case "/admin/reload":
+				handleConfigReload(c)
+			default:
+				c.Error("Unsupported path", fasthttp.StatusNotFound)
+			}
+		},
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("DoH server shutting down")
+		_ = server.Shutdown()
+	}()
+
+	logger.Info("DoH server started", "address", "127.0.0.1:8080")
+	if err := server.ListenAndServe("127.0.0.1:8080"); err != nil {
+		if ctx.Err() == nil {
+			logger.Error("DoH server error", "error", err)
+			log.Fatalf("DoH server error: %v", err)
+		}
+	}
+}
+
+// ======================== main ========================
+
+func main() {
+	// Effective GC tuning at runtime (unlike setting env var)
+	debug.SetGCPercent(50)
+
+	// Load configuration
+	cfg, err := LoadConfig("config.json")
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+	config.Store(cfg)
+
+	// Initialize logger
+	logger = initLogger(cfg.LogLevel)
+	logger.Info("smartSNI starting", "version", "2.0")
+
+	// Initialize upstream servers
+	dohUpstream.Store(cfg.UpstreamDOH)
+
+	// Load auth tokens
+	for _, token := range cfg.AuthTokens {
+		authTokens.Store(token, true)
+	}
+
+	// Optional override for DoH upstream via env
+	if v := os.Getenv("DOH_UPSTREAM"); v != "" {
+		dohURL = v
+		logger.Info("DoH upstream override from env", "upstream", v)
+	}
+
+	// Shared rate limiter for DoH/DoT (50 req/s, burst 100)
+	limiter = rate.NewLimiter(rate.Limit(50), 100)
+
+	logger.Info("configuration loaded",
+		"host", cfg.Host,
+		"domains", len(cfg.Domains),
+		"cache_ttl", cfg.CacheTTL,
+		"upstream_servers", len(cfg.UpstreamDOH),
+		"auth_enabled", cfg.EnableAuth,
+		"metrics_enabled", cfg.MetricsEnabled,
+	)
+
+	// Start cache cleanup goroutine
+	go cleanExpiredCache()
+
+	// Start session cleanup goroutine
+	go cleanExpiredSessions()
+
+	// Setup signal handling
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Start all servers
+	var wg sync.WaitGroup
+	serverCount := 3
+
+	// Check if web panel should be started
+	if cfg.WebPanelEnabled && cfg.WebPanelUsername != "" && cfg.WebPanelPassword != "" {
+		serverCount++
+	}
+
+	wg.Add(serverCount)
+
+	go runDOHServer(ctx, &wg)
+	go startDoTServer(ctx, &wg)
+	go serveSniProxy(ctx, &wg)
+
+	// Start web panel if enabled
+	if cfg.WebPanelEnabled && cfg.WebPanelUsername != "" && cfg.WebPanelPassword != "" {
+		go runWebPanelServer(ctx, &wg)
+	}
+
+	logger.Info("all servers started",
+		"sni_port", 443,
+		"dot_port", 853,
+		"doh_address", "127.0.0.1:8080",
+		"web_panel_enabled", cfg.WebPanelEnabled,
+		"web_panel_port", cfg.WebPanelPort,
+	)
+
+	// Wait for shutdown signal
+	<-ctx.Done()
+	logger.Info("shutdown signal received, stopping servers...")
+
+	// Wait for all servers to stop
+	wg.Wait()
+	logger.Info("shutdown complete")
+}

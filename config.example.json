@@ -1,0 +1,58 @@
+{
+  "_comment": "Smart SNI Proxy v2.0 - Configuration Example",
+
+  "host": "dns.example.com",
+  "_host_description": "Your server's domain name (REQUIRED)",
+
+  "domains": {
+    "*.youtube.com": "1.2.3.4",
+    "*.googlevideo.com": "1.2.3.4",
+    "*.google.com": "1.2.3.4",
+    "example.com": "1.2.3.4"
+  },
+  "_domains_description": "Domain patterns to route through this server. Supports wildcards (*.domain.com). Replace 1.2.3.4 with your server IP.",
+
+  "upstream_doh": [
+    "https://1.1.1.1/dns-query",
+    "https://1.0.0.1/dns-query",
+    "https://8.8.8.8/dns-query",
+    "https://8.8.4.4/dns-query"
+  ],
+  "_upstream_doh_description": "List of upstream DoH servers. First available will be used, with automatic failover.",
+
+  "enable_auth": false,
+  "_enable_auth_description": "Set to true to require Bearer token authentication for DoH/DoT requests",
+
+  "auth_tokens": [
+    "replace-with-random-secure-token-1",
+    "replace-with-random-secure-token-2"
+  ],
+  "_auth_tokens_description": "Valid authentication tokens. Generate with: openssl rand -hex 32",
+
+  "cache_ttl": 300,
+  "_cache_ttl_description": "DNS cache TTL in seconds (0 to disable caching)",
+
+  "rate_limit_per_ip": 10,
+  "_rate_limit_per_ip_description": "Maximum requests per second per IP address",
+
+  "rate_limit_burst_ip": 20,
+  "_rate_limit_burst_ip_description": "Burst limit for per-IP rate limiting",
+
+  "log_level": "info",
+  "_log_level_description": "Logging level: debug, info, warn, error",
+
+  "trusted_proxies": [
+    "127.0.0.1",
+    "::1"
+  ],
+  "_trusted_proxies_description": "List of trusted proxy IPs for X-Forwarded-For header",
+
+  "blocked_domains": [
+    "*.ads.example.com",
+    "tracker.malware.com"
+  ],
+  "_blocked_domains_description": "Domain patterns to block. DNS queries will return REFUSED.",
+
+  "metrics_enabled": true,
+  "_metrics_enabled_description": "Enable /metrics and /metrics/prometheus endpoints"
+}

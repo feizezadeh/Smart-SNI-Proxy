@@ -1,0 +1,24 @@
+{
+  "host": "<YOUR_HOST>",
+  "domains": {
+    "*.youtube.com": "<YOUR_IP>",
+    "*.google.com": "<YOUR_IP>"
+  },
+  "upstream_doh": [
+    "https://1.1.1.1/dns-query",
+    "https://8.8.8.8/dns-query"
+  ],
+  "enable_auth": false,
+  "auth_tokens": [],
+  "cache_ttl": 300,
+  "rate_limit_per_ip": 10,
+  "rate_limit_burst_ip": 20,
+  "log_level": "info",
+  "trusted_proxies": [],
+  "blocked_domains": [],
+  "metrics_enabled": true,
+  "web_panel_enabled": true,
+  "web_panel_username": "admin",
+  "web_panel_password": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
+  "web_panel_port": 8088
+}
