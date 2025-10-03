@@ -774,8 +774,9 @@ func startDoTServer(ctx context.Context, wg *sync.WaitGroup) {
 		filepath.Join(certDir, "privkey.pem"),
 	)
 	if err != nil {
-		logger.Error("DoT: failed to load certificate", "error", err)
-		log.Fatal("DoT: load cert:", err)
+		logger.Warn("DoT: SSL certificate not found, DoT server disabled", "error", err, "cert_dir", certDir)
+		logger.Warn("DoT: to enable DoT, obtain SSL certificate with: certbot --nginx -d <domain>")
+		return
 	}
 
 	tlsCfg := &tls.Config{
