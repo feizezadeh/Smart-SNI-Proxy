@@ -48,7 +48,7 @@ You can obtain a valid certificate for your domain with lets encrypt
 ## Auto Install
 
 ```
-bash <(curl -fsSL https://raw.githubusercontent.com/Ptechgithub/smartSNI/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/feizezadeh/Smart-SNI-Proxy/main/install.sh)
 ```
 ![19](https://raw.githubusercontent.com/Ptechgithub/configs/main/media/19.jpg)
 
@@ -84,7 +84,14 @@ Contributions to this project are welcome. Please fork the repository, make your
 
 ## Credits
 
-Special thanks to [Peyman](https://github.com/Ptechgithub) for auto install script
+- Original author: [Ptechgithub](https://github.com/Ptechgithub)
+- Enhanced by: [feizezadeh](https://github.com/feizezadeh)
+- Special thanks to [Peyman](https://github.com/Ptechgithub) for auto install script
+
+## Support
+
+- **Repository:** https://github.com/feizezadeh/Smart-SNI-Proxy
+- **Issues:** https://github.com/feizezadeh/Smart-SNI-Proxy/issues
 
 ## License
 
