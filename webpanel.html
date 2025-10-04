@@ -465,15 +465,61 @@
             <!-- User Management Panel -->
             <div class="panel">
                 <h2>👥 User Management</h2>
-                <div style="margin-bottom: 20px;">
-                    <button onclick="showCreateInvite()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">Create Invite Link</button>
-                    <button onclick="loadUsers()" class="btn btn-primary" style="width: auto; padding: 10px 20px; margin-left: 10px;">Refresh Users</button>
+                <div style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button onclick="showCreateUserDialog()" class="btn btn-success" style="width: auto; padding: 10px 20px;">
+                        ➕ Create User Manually
+                    </button>
+                    <button onclick="showCreateInviteDialog()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">
+                        🔗 Create Invite Link
+                    </button>
+                    <button onclick="loadUsers()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">
+                        🔄 Refresh
+                    </button>
+                    <button onclick="showInvitesList()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">
+                        📋 View Invites
+                    </button>
                 </div>
                 <div id="usersList" class="domain-list">
                     <div class="loading">
                         <div class="spinner"></div>
                         Loading users...
                     </div>
+                </div>
+            </div>
+
+            <!-- Create User Dialog (Hidden) -->
+            <div id="createUserDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+                <div style="background: white; border-radius: 15px; padding: 30px; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                    <h3 style="margin-bottom: 20px; color: #667eea;">➕ Create New User</h3>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">IP Address *</label>
+                        <input type="text" id="newUserIP" placeholder="e.g., 192.168.1.100" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Name *</label>
+                        <input type="text" id="newUserName" placeholder="e.g., John Doe" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Description</label>
+                        <textarea id="newUserDesc" placeholder="Optional description" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; min-height: 60px;"></textarea>
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">Valid Days *</label>
+                        <input type="number" id="newUserDays" value="30" min="1" max="365" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="createUserManually()" class="btn btn-success" style="flex: 1;">Create User</button>
+                        <button onclick="closeCreateUserDialog()" class="btn" style="flex: 1; background: #95a5a6;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Invites List Dialog (Hidden) -->
+            <div id="invitesDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+                <div style="background: white; border-radius: 15px; padding: 30px; max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                    <h3 style="margin-bottom: 20px; color: #667eea;">📋 Invitation Tokens</h3>
+                    <div id="invitesListContent">Loading...</div>
+                    <button onclick="closeInvitesDialog()" class="btn btn-primary" style="margin-top: 20px; width: auto; padding: 10px 20px;">Close</button>
                 </div>
             </div>
 
@@ -869,7 +915,125 @@
             }
         }
 
-        async function showCreateInvite() {
+        // ========== Dialog Functions ==========
+
+        function showCreateUserDialog() {
+            document.getElementById('createUserDialog').style.display = 'flex';
+        }
+
+        function closeCreateUserDialog() {
+            document.getElementById('createUserDialog').style.display = 'none';
+            document.getElementById('newUserIP').value = '';
+            document.getElementById('newUserName').value = '';
+            document.getElementById('newUserDesc').value = '';
+            document.getElementById('newUserDays').value = '30';
+        }
+
+        async function createUserManually() {
+            const ip = document.getElementById('newUserIP').value.trim();
+            const name = document.getElementById('newUserName').value.trim();
+            const description = document.getElementById('newUserDesc').value.trim();
+            const validDays = parseInt(document.getElementById('newUserDays').value);
+
+            if (!ip || !name || !validDays) {
+                alert('Please fill in all required fields');
+                return;
+            }
+
+            // Simple IP validation
+            const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;
+            if (!ipPattern.test(ip)) {
+                alert('Please enter a valid IP address');
+                return;
+            }
+
+            try {
+                const response = await fetch('/panel/api/users/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': sessionId
+                    },
+                    body: JSON.stringify({
+                        ip: ip,
+                        name: name,
+                        description: description,
+                        valid_days: validDays
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    alert(`✅ User created successfully!\n\nIP: ${data.user.ip}\nName: ${data.user.name}\nExpires: ${new Date(data.user.expires_at).toLocaleDateString()}`);
+                    closeCreateUserDialog();
+                    await loadUsers();
+                } else {
+                    const data = await response.json();
+                    alert('❌ ' + (data.error || 'Failed to create user'));
+                }
+            } catch (error) {
+                alert('Connection error');
+            }
+        }
+
+        async function showInvitesList() {
+            document.getElementById('invitesDialog').style.display = 'flex';
+            document.getElementById('invitesListContent').innerHTML = '<div style="text-align: center; padding: 20px;"><div class="spinner"></div> Loading...</div>';
+
+            try {
+                const response = await fetch('/panel/api/invite/list', {
+                    headers: { 'X-Session-ID': sessionId }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    displayInvites(data.invites || []);
+                } else {
+                    document.getElementById('invitesListContent').innerHTML = '<p style="color: #e74c3c;">Failed to load invites</p>';
+                }
+            } catch (error) {
+                document.getElementById('invitesListContent').innerHTML = '<p style="color: #e74c3c;">Connection error</p>';
+            }
+        }
+
+        function displayInvites(invites) {
+            const container = document.getElementById('invitesListContent');
+
+            if (invites.length === 0) {
+                container.innerHTML = '<p style="color: #666; text-align: center;">No invitation tokens created yet</p>';
+                return;
+            }
+
+            let html = '<table style="width: 100%; border-collapse: collapse; font-size: 14px;">';
+            html += '<tr style="background: #f5f5f5; text-align: left;">';
+            html += '<th style="padding: 10px;">Token</th><th>Valid Days</th><th>Max Uses</th><th>Used</th><th>Expires</th><th>Status</th></tr>';
+
+            invites.forEach(inv => {
+                const isExpired = new Date(inv.expires_at) < new Date();
+                const isMaxed = inv.max_uses > 0 && inv.used_count >= inv.max_uses;
+                const statusColor = inv.is_active && !isExpired && !isMaxed ? '#27ae60' : '#e74c3c';
+                const statusText = inv.is_active && !isExpired && !isMaxed ? 'Active' : 'Inactive';
+                const tokenShort = inv.token.substring(0, 8) + '...';
+
+                html += `<tr style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 10px; font-family: monospace;">${tokenShort}</td>
+                    <td>${inv.valid_days}</td>
+                    <td>${inv.max_uses === 0 ? 'Unlimited' : inv.max_uses}</td>
+                    <td>${inv.used_count}</td>
+                    <td>${new Date(inv.expires_at).toLocaleDateString()}</td>
+                    <td><span style="color: ${statusColor};">● ${statusText}</span></td>
+                </tr>`;
+            });
+
+            html += '</table>';
+            container.innerHTML = html;
+        }
+
+        function closeInvitesDialog() {
+            document.getElementById('invitesDialog').style.display = 'none';
+        }
+
+        async function showCreateInviteDialog() {
             const validDays = prompt('Access duration in days?', '30');
             if (!validDays || isNaN(validDays)) return;
 
