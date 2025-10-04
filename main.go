@@ -121,8 +121,8 @@ type InviteToken struct {
 	CreatedBy   string    `json:"created_by"`   // Admin who created it
 	CreatedAt   time.Time `json:"created_at"`   // Creation time
 	ExpiresAt   time.Time `json:"expires_at"`   // Token expiration
-	MaxUses     int       `json:"max_uses"`     // Maximum number of uses (0 = unlimited)
-	UsedCount   int       `json:"used_count"`   // Number of times used
+	MaxIPs      int       `json:"max_ips"`      // Maximum number of IPs allowed (0 = unlimited)
+	UsedIPs     []string  `json:"used_ips"`     // List of registered IPs
 	ValidDays   int       `json:"valid_days"`   // Days of access for registered user
 	IsActive    bool      `json:"is_active"`    // Active status
 }
@@ -474,7 +474,7 @@ func deleteUser(userID string) error {
 }
 
 // Create invite token
-func createInviteToken(createdBy string, validDays, maxUses int, tokenExpiryDays int) (*InviteToken, error) {
+func createInviteToken(createdBy string, validDays, maxIPs int, tokenExpiryDays int) (*InviteToken, error) {
 	token, err := generateToken()
 	if err != nil {
 		return nil, err
@@ -486,19 +486,19 @@ func createInviteToken(createdBy string, validDays, maxUses int, tokenExpiryDays
 		CreatedBy: createdBy,
 		CreatedAt: now,
 		ExpiresAt: now.AddDate(0, 0, tokenExpiryDays),
-		MaxUses:   maxUses,
-		UsedCount: 0,
+		MaxIPs:    maxIPs,
+		UsedIPs:   []string{},
 		ValidDays: validDays,
 		IsActive:  true,
 	}
 
 	inviteTokens.Store(token, invite)
-	logger.Info("invite token created", "token", token, "valid_days", validDays, "max_uses", maxUses)
+	logger.Info("invite token created", "token", token, "valid_days", validDays, "max_ips", maxIPs)
 	return invite, nil
 }
 
-// Validate and use invite token
-func useInviteToken(token string) (*InviteToken, error) {
+// Validate and use invite token for IP registration
+func useInviteToken(token, userIP string) (*InviteToken, error) {
 	val, ok := inviteTokens.Load(token)
 	if !ok {
 		return nil, errors.New("invalid token")
@@ -514,11 +514,20 @@ func useInviteToken(token string) (*InviteToken, error) {
 		return nil, errors.New("token expired")
 	}
 
-	if invite.MaxUses > 0 && invite.UsedCount >= invite.MaxUses {
-		return nil, errors.New("token usage limit reached")
+	// Check if IP already registered with this token
+	for _, ip := range invite.UsedIPs {
+		if ip == userIP {
+			return nil, errors.New("IP already registered with this token")
+		}
 	}
 
-	invite.UsedCount++
+	// Check if max IPs limit reached
+	if invite.MaxIPs > 0 && len(invite.UsedIPs) >= invite.MaxIPs {
+		return nil, errors.New("token IP limit reached")
+	}
+
+	// Add IP to used list
+	invite.UsedIPs = append(invite.UsedIPs, userIP)
 	inviteTokens.Store(token, invite)
 
 	return invite, nil
@@ -1864,7 +1873,7 @@ func handlePanelCreateInvite(ctx *fasthttp.RequestCtx) {
 
 	var req struct {
 		ValidDays       int `json:"valid_days"`        // Days of access for user
-		MaxUses         int `json:"max_uses"`          // Max times token can be used
+		MaxIPs          int `json:"max_ips"`           // Max IPs allowed to register
 		TokenExpiryDays int `json:"token_expiry_days"` // Days until token expires
 	}
 
@@ -1882,7 +1891,7 @@ func handlePanelCreateInvite(ctx *fasthttp.RequestCtx) {
 		req.TokenExpiryDays = 7 // Default: token expires in 7 days
 	}
 
-	invite, err := createInviteToken("admin", req.ValidDays, req.MaxUses, req.TokenExpiryDays)
+	invite, err := createInviteToken("admin", req.ValidDays, req.MaxIPs, req.TokenExpiryDays)
 	if err != nil {
 		logger.Error("failed to create invite", "error", err)
 		ctx.Error(`{"error":"Failed to create invite"}`, fasthttp.StatusInternalServerError)
@@ -2200,15 +2209,15 @@ func handleRegisterSubmit(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Validate and use token
-	invite, err := useInviteToken(req.Token)
+	// Get client IP
+	clientIP := getClientIP(ctx)
+
+	// Validate and use token with IP
+	invite, err := useInviteToken(req.Token, clientIP)
 	if err != nil {
 		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusForbidden)
 		return
 	}
-
-	// Get client IP
-	clientIP := getClientIP(ctx)
 
 	// Check if IP already registered
 	if existingUser := getUserByIP(clientIP); existingUser != nil {
