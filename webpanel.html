@@ -927,107 +927,51 @@
 
         // ========== Dialog Functions ==========
 
-        async function showInvitesList() {
-            document.getElementById('invitesDialog').style.display = 'flex';
-            document.getElementById('invitesListContent').innerHTML = '<div style="text-align: center; padding: 20px;"><div class="spinner"></div> Loading...</div>';
-
-            try {
-                const response = await fetch('/panel/api/invite/list', {
-                    headers: { 'X-Session-ID': sessionId }
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    displayInvites(data.invites || []);
-                } else {
-                    document.getElementById('invitesListContent').innerHTML = '<p style="color: #e74c3c;">Failed to load invites</p>';
-                }
-            } catch (error) {
-                document.getElementById('invitesListContent').innerHTML = '<p style="color: #e74c3c;">Connection error</p>';
-            }
+        function showCreateUserDialog() {
+            document.getElementById('createUserDialog').style.display = 'flex';
         }
 
-        function displayInvites(invites) {
-            const container = document.getElementById('invitesListContent');
+        function closeCreateUserDialog() {
+            document.getElementById('createUserDialog').style.display = 'none';
+            document.getElementById('userName').value = '';
+            document.getElementById('userDescription').value = '';
+            document.getElementById('userMaxIPs').value = '3';
+            document.getElementById('userValidDays').value = '30';
+        }
 
-            if (invites.length === 0) {
-                container.innerHTML = '<p style="color: #666; text-align: center;">No invitation tokens created yet</p>';
+        async function createUser() {
+            const name = document.getElementById('userName').value.trim();
+            const description = document.getElementById('userDescription').value.trim();
+            const maxIPs = parseInt(document.getElementById('userMaxIPs').value);
+            const validDays = parseInt(document.getElementById('userValidDays').value);
+
+            if (!name) {
+                alert('❌ Please enter a name');
                 return;
             }
 
-            let html = '<table style="width: 100%; border-collapse: collapse; font-size: 14px;">';
-            html += '<tr style="background: #f5f5f5; text-align: left;">';
-            html += '<th style="padding: 10px;">Token</th><th>Valid Days</th><th>Max IPs</th><th>Used IPs</th><th>Expires</th><th>Status</th></tr>';
-
-            invites.forEach(inv => {
-                const isExpired = new Date(inv.expires_at) < new Date();
-                const usedIPs = inv.used_ips ? inv.used_ips.length : 0;
-                const maxIPs = inv.max_ips || 0;
-                const isMaxed = maxIPs > 0 && usedIPs >= maxIPs;
-                const statusColor = inv.is_active && !isExpired && !isMaxed ? '#27ae60' : '#e74c3c';
-                const statusText = inv.is_active && !isExpired && !isMaxed ? 'Active' : 'Inactive';
-                const tokenShort = inv.token.substring(0, 8) + '...';
-
-                html += `<tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 10px; font-family: monospace;">${tokenShort}</td>
-                    <td>${inv.valid_days}</td>
-                    <td>${maxIPs === 0 ? 'Unlimited' : maxIPs}</td>
-                    <td>${usedIPs}</td>
-                    <td>${new Date(inv.expires_at).toLocaleDateString()}</td>
-                    <td><span style="color: ${statusColor};">● ${statusText}</span></td>
-                </tr>`;
-            });
-
-            html += '</table>';
-            container.innerHTML = html;
-        }
-
-        function closeInvitesDialog() {
-            document.getElementById('invitesDialog').style.display = 'none';
-        }
-
-        function showCreateInviteDialog() {
-            document.getElementById('createInviteDialog').style.display = 'flex';
-        }
-
-        function closeCreateInviteDialog() {
-            document.getElementById('createInviteDialog').style.display = 'none';
-            document.getElementById('inviteValidDays').value = '30';
-            document.getElementById('inviteMaxIPs').value = '5';
-            document.getElementById('inviteTokenExpiry').value = '7';
-        }
-
-        async function createInviteLink() {
-            const validDays = parseInt(document.getElementById('inviteValidDays').value);
-            const maxIPs = parseInt(document.getElementById('inviteMaxIPs').value);
-            const tokenExpiry = parseInt(document.getElementById('inviteTokenExpiry').value);
-
-            if (!validDays || validDays < 1 || validDays > 365) {
-                alert('❌ Please enter a valid access duration (1-365 days)');
+            if (maxIPs < 1 || maxIPs > 100) {
+                alert('❌ Please enter valid max IPs (1-100)');
                 return;
             }
 
-            if (maxIPs < 0 || maxIPs > 1000) {
-                alert('❌ Please enter a valid max IPs (0-1000)');
-                return;
-            }
-
-            if (!tokenExpiry || tokenExpiry < 1 || tokenExpiry > 90) {
-                alert('❌ Please enter a valid token expiry (1-90 days)');
+            if (validDays < 1 || validDays > 365) {
+                alert('❌ Please enter valid days (1-365)');
                 return;
             }
 
             try {
-                const response = await fetch('/panel/api/invite/create', {
+                const response = await fetch('/panel/api/users/create', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'X-Session-ID': sessionId
                     },
                     body: JSON.stringify({
-                        valid_days: validDays,
+                        name: name,
+                        description: description,
                         max_ips: maxIPs,
-                        token_expiry_days: tokenExpiry
+                        valid_days: validDays
                     })
                 });
 
@@ -1035,31 +979,33 @@
                     const data = await response.json();
 
                     // Show result dialog
-                    document.getElementById('inviteLinkResult').value = data.register_url;
-                    document.getElementById('resultValidDays').textContent = validDays;
-                    document.getElementById('resultMaxIPs').textContent = maxIPs === 0 ? 'Unlimited' : maxIPs;
-                    document.getElementById('resultTokenExpiry').textContent = tokenExpiry;
+                    document.getElementById('userLinkResult').value = data.register_url;
+                    document.getElementById('resultUserName').textContent = data.user.name;
+                    document.getElementById('resultUserMaxIPs').textContent = data.user.max_ips;
+                    document.getElementById('resultUserValidDays').textContent = validDays;
+                    document.getElementById('resultUserExpires').textContent = new Date(data.user.expires_at).toLocaleDateString();
 
-                    closeCreateInviteDialog();
-                    document.getElementById('inviteResultDialog').style.display = 'flex';
+                    closeCreateUserDialog();
+                    document.getElementById('userResultDialog').style.display = 'flex';
+                    await loadUsers();
                 } else {
                     const data = await response.json();
-                    alert('❌ ' + (data.error || 'Failed to create invite'));
+                    alert('❌ ' + (data.error || 'Failed to create user'));
                 }
             } catch (error) {
                 alert('❌ Connection error');
             }
         }
 
-        function copyInviteLink() {
-            const linkInput = document.getElementById('inviteLinkResult');
+        function copyUserLink() {
+            const linkInput = document.getElementById('userLinkResult');
             linkInput.select();
             navigator.clipboard.writeText(linkInput.value);
             alert('✅ Link copied to clipboard!');
         }
 
-        function closeInviteResultDialog() {
-            document.getElementById('inviteResultDialog').style.display = 'none';
+        function closeUserResultDialog() {
+            document.getElementById('userResultDialog').style.display = 'none';
         }
     </script>
 </body>
