@@ -484,6 +484,53 @@
                 </div>
             </div>
 
+            <!-- Create Invite Dialog (Hidden) -->
+            <div id="createInviteDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+                <div style="background: white; border-radius: 15px; padding: 30px; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                    <h3 style="margin-bottom: 20px; color: #667eea;">🔗 Create Invitation Link</h3>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">🕐 Access Duration (days) *</label>
+                        <input type="number" id="inviteValidDays" value="30" min="1" max="365" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                        <small style="color: #666;">How many days users will have access to DNS services</small>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">👥 Maximum IPs Allowed *</label>
+                        <input type="number" id="inviteMaxIPs" value="5" min="0" max="1000" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                        <small style="color: #666;">Maximum number of IPs that can register with this token (0 = unlimited)</small>
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">⏰ Token Expiry (days) *</label>
+                        <input type="number" id="inviteTokenExpiry" value="7" min="1" max="90" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                        <small style="color: #666;">How many days until this invitation link expires</small>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button onclick="createInviteLink()" class="btn btn-success" style="flex: 1;">🔗 Create Link</button>
+                        <button onclick="closeCreateInviteDialog()" class="btn" style="flex: 1; background: #95a5a6;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Invite Result Dialog (Hidden) -->
+            <div id="inviteResultDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; align-items: center; justify-content: center;">
+                <div style="background: white; border-radius: 15px; padding: 30px; max-width: 600px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                    <h3 style="margin-bottom: 20px; color: #27ae60;">✅ Invitation Link Created!</h3>
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500; color: #666;">Registration Link:</label>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="text" id="inviteLinkResult" readonly style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 13px;">
+                            <button onclick="copyInviteLink()" class="btn btn-primary" style="width: auto; padding: 10px 15px;">📋 Copy</button>
+                        </div>
+                    </div>
+                    <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; border-left: 4px solid #27ae60; margin-bottom: 20px;">
+                        <p style="margin: 0 0 10px 0; font-weight: 500;">📋 Token Details:</p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Access Duration: <strong id="resultValidDays"></strong> days</p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Max IPs Allowed: <strong id="resultMaxIPs"></strong></p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Token Expires: <strong id="resultTokenExpiry"></strong> days</p>
+                    </div>
+                    <button onclick="closeInviteResultDialog()" class="btn btn-primary" style="width: 100%;">Close</button>
+                </div>
+            </div>
+
             <!-- Invites List Dialog (Hidden) -->
             <div id="invitesDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
                 <div style="background: white; border-radius: 15px; padding: 30px; max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
@@ -946,15 +993,36 @@
             document.getElementById('invitesDialog').style.display = 'none';
         }
 
-        async function showCreateInviteDialog() {
-            const validDays = prompt('🕐 Access duration (days):', '30');
-            if (!validDays || isNaN(validDays)) return;
+        function showCreateInviteDialog() {
+            document.getElementById('createInviteDialog').style.display = 'flex';
+        }
 
-            const maxIPs = prompt('👥 Maximum IPs allowed (0 = unlimited):', '5');
-            if (maxIPs === null) return;
+        function closeCreateInviteDialog() {
+            document.getElementById('createInviteDialog').style.display = 'none';
+            document.getElementById('inviteValidDays').value = '30';
+            document.getElementById('inviteMaxIPs').value = '5';
+            document.getElementById('inviteTokenExpiry').value = '7';
+        }
 
-            const tokenExpiry = prompt('⏰ Token expiry (days):', '7');
-            if (!tokenExpiry || isNaN(tokenExpiry)) return;
+        async function createInviteLink() {
+            const validDays = parseInt(document.getElementById('inviteValidDays').value);
+            const maxIPs = parseInt(document.getElementById('inviteMaxIPs').value);
+            const tokenExpiry = parseInt(document.getElementById('inviteTokenExpiry').value);
+
+            if (!validDays || validDays < 1 || validDays > 365) {
+                alert('❌ Please enter a valid access duration (1-365 days)');
+                return;
+            }
+
+            if (maxIPs < 0 || maxIPs > 1000) {
+                alert('❌ Please enter a valid max IPs (0-1000)');
+                return;
+            }
+
+            if (!tokenExpiry || tokenExpiry < 1 || tokenExpiry > 90) {
+                alert('❌ Please enter a valid token expiry (1-90 days)');
+                return;
+            }
 
             try {
                 const response = await fetch('/panel/api/invite/create', {
@@ -964,34 +1032,23 @@
                         'X-Session-ID': sessionId
                     },
                     body: JSON.stringify({
-                        valid_days: parseInt(validDays),
-                        max_ips: parseInt(maxIPs),
-                        token_expiry_days: parseInt(tokenExpiry)
+                        valid_days: validDays,
+                        max_ips: maxIPs,
+                        token_expiry_days: tokenExpiry
                     })
                 });
 
                 if (response.ok) {
                     const data = await response.json();
-                    const url = data.register_url;
 
-                    // Show in a nice dialog
-                    const dialog = `
-✅ Registration Link Created!
+                    // Show result dialog
+                    document.getElementById('inviteLinkResult').value = data.register_url;
+                    document.getElementById('resultValidDays').textContent = validDays;
+                    document.getElementById('resultMaxIPs').textContent = maxIPs === 0 ? 'Unlimited' : maxIPs;
+                    document.getElementById('resultTokenExpiry').textContent = tokenExpiry;
 
-🔗 Link: ${url}
-
-📋 Details:
-• Access Duration: ${validDays} days
-• Max IPs Allowed: ${maxIPs == 0 ? 'Unlimited' : maxIPs}
-• Token Expires: ${tokenExpiry} days
-
-Click OK to copy link to clipboard
-                    `;
-
-                    if (confirm(dialog)) {
-                        navigator.clipboard.writeText(url);
-                        alert('✅ Link copied to clipboard!');
-                    }
+                    closeCreateInviteDialog();
+                    document.getElementById('inviteResultDialog').style.display = 'flex';
                 } else {
                     const data = await response.json();
                     alert('❌ ' + (data.error || 'Failed to create invite'));
@@ -999,6 +1056,17 @@ Click OK to copy link to clipboard
             } catch (error) {
                 alert('❌ Connection error');
             }
+        }
+
+        function copyInviteLink() {
+            const linkInput = document.getElementById('inviteLinkResult');
+            linkInput.select();
+            navigator.clipboard.writeText(linkInput.value);
+            alert('✅ Link copied to clipboard!');
+        }
+
+        function closeInviteResultDialog() {
+            document.getElementById('inviteResultDialog').style.display = 'none';
         }
     </script>
 </body>
