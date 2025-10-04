@@ -1,0 +1,37 @@
+================================================
+تغییر Remote URL در سرور
+================================================
+
+مشکل: سرور از repository قدیمی pull می‌کند!
+
+روی سرور این دستورات را اجرا کنید:
+
+cd /root/smartSNI
+
+# تغییر remote URL به repository جدید
+git remote set-url origin https://github.com/feizezadeh/Smart-SNI-Proxy.git
+
+# بررسی
+git remote -v
+
+# حالا pull کنید
+git fetch origin
+git reset --hard origin/main
+
+# بررسی فایل‌های جدید
+ls -la
+
+باید این فایل‌ها را ببینید:
+✅ check_server.sh
+✅ fix_server.sh
+✅ webpanel.html
+✅ UPDATE_SERVER.txt
+
+================================================
+بعد از تغییر remote، اسکریپت fix را اجرا کنید:
+================================================
+
+chmod +x fix_server.sh
+./fix_server.sh
+
+================================================
