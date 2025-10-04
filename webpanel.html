@@ -586,7 +586,8 @@
             await Promise.all([
                 loadMetrics(),
                 loadDomains(),
-                loadHealth()
+                loadHealth(),
+                loadUsers()
             ]);
         }
 
@@ -917,11 +918,6 @@
             } catch (error) {
                 alert('Connection error');
             }
-        }
-
-        // Load users on dashboard load
-        if (sessionId) {
-            loadUsers();
         }
     </script>
 </body>

@@ -1599,7 +1599,8 @@ func handlePanelAddDomain(ctx *fasthttp.RequestCtx) {
 	// Read current config
 	cfg, err := LoadConfig("config.json")
 	if err != nil {
-		ctx.Error(`{"error":"Failed to load config"}`, fasthttp.StatusInternalServerError)
+		logger.Error("failed to load config for add domain", "error", err)
+		ctx.Error(fmt.Sprintf(`{"error":"Failed to load config: %s"}`, err.Error()), fasthttp.StatusInternalServerError)
 		return
 	}
 
