@@ -945,17 +945,19 @@
             const maxIPs = parseInt(document.getElementById('userMaxIPs').value);
             const validDays = parseInt(document.getElementById('userValidDays').value);
 
+            console.log('Creating user:', { name, description, maxIPs, validDays });
+
             if (!name) {
                 alert('❌ Please enter a name');
                 return;
             }
 
-            if (maxIPs < 1 || maxIPs > 100) {
+            if (isNaN(maxIPs) || maxIPs < 1 || maxIPs > 100) {
                 alert('❌ Please enter valid max IPs (1-100)');
                 return;
             }
 
-            if (validDays < 1 || validDays > 365) {
+            if (isNaN(validDays) || validDays < 1 || validDays > 365) {
                 alert('❌ Please enter valid days (1-365)');
                 return;
             }
@@ -977,6 +979,7 @@
 
                 if (response.ok) {
                     const data = await response.json();
+                    console.log('User created successfully:', data);
 
                     // Show result dialog
                     document.getElementById('userLinkResult').value = data.register_url;
@@ -989,11 +992,18 @@
                     document.getElementById('userResultDialog').style.display = 'flex';
                     await loadUsers();
                 } else {
-                    const data = await response.json();
-                    alert('❌ ' + (data.error || 'Failed to create user'));
+                    const errorText = await response.text();
+                    console.error('Error response:', response.status, errorText);
+                    try {
+                        const data = JSON.parse(errorText);
+                        alert('❌ ' + (data.error || 'Failed to create user'));
+                    } catch (e) {
+                        alert('❌ Server error: ' + errorText);
+                    }
                 }
             } catch (error) {
-                alert('❌ Connection error');
+                console.error('Exception:', error);
+                alert('❌ Connection error: ' + error.message);
             }
         }
 
