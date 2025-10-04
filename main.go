@@ -45,6 +45,8 @@ var (
 	config      atomic.Value // *Config - thread-safe config
 	limiter     *rate.Limiter
 	ipLimiters  sync.Map // map[string]*rate.Limiter - per-IP rate limiting
+	users       sync.Map // map[string]*User - user management
+	inviteTokens sync.Map // map[string]*InviteToken - invitation tokens
 	dohURL      = "https://1.1.1.1/dns-query"
 	dohUpstream atomic.Value // []string - multiple upstream servers
 	dohClient   = &http.Client{
@@ -97,6 +99,32 @@ type Config struct {
 	WebPanelUsername  string            `json:"web_panel_username,omitempty"`
 	WebPanelPassword  string            `json:"web_panel_password,omitempty"` // SHA256 hash
 	WebPanelPort      int               `json:"web_panel_port,omitempty"`
+	UserManagement    bool              `json:"user_management,omitempty"`    // Enable user-based access control
+}
+
+// User represents a registered user with IP-based access
+type User struct {
+	ID          string    `json:"id"`           // Unique user ID
+	IP          string    `json:"ip"`           // User's registered IP address
+	Name        string    `json:"name"`         // User's name/identifier
+	CreatedAt   time.Time `json:"created_at"`   // Registration time
+	ExpiresAt   time.Time `json:"expires_at"`   // Expiration time
+	IsActive    bool      `json:"is_active"`    // Active status
+	Description string    `json:"description"`  // Optional description
+	UsageCount  uint64    `json:"usage_count"`  // Number of DNS queries made
+	LastUsed    time.Time `json:"last_used"`    // Last query time
+}
+
+// InviteToken represents an invitation token for user registration
+type InviteToken struct {
+	Token       string    `json:"token"`        // Unique token
+	CreatedBy   string    `json:"created_by"`   // Admin who created it
+	CreatedAt   time.Time `json:"created_at"`   // Creation time
+	ExpiresAt   time.Time `json:"expires_at"`   // Token expiration
+	MaxUses     int       `json:"max_uses"`     // Maximum number of uses (0 = unlimited)
+	UsedCount   int       `json:"used_count"`   // Number of times used
+	ValidDays   int       `json:"valid_days"`   // Days of access for registered user
+	IsActive    bool      `json:"is_active"`    // Active status
 }
 
 // Metrics holds runtime statistics
@@ -313,6 +341,222 @@ func generateSessionID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ======================== User Management Functions ========================
+
+func generateToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func generateUserID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// Check if user is authorized based on IP
+func isUserAuthorized(ip string) bool {
+	cfg := getConfig()
+	if !cfg.UserManagement {
+		return true // User management disabled, allow all
+	}
+
+	// Check if IP has valid user registration
+	var authorized bool
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		if user.IP == ip && user.IsActive {
+			// Check expiration
+			if time.Now().Before(user.ExpiresAt) {
+				authorized = true
+				// Update usage stats
+				user.UsageCount++
+				user.LastUsed = time.Now()
+				users.Store(key, user)
+				return false // stop iteration
+			}
+		}
+		return true // continue iteration
+	})
+
+	return authorized
+}
+
+// Get user by IP
+func getUserByIP(ip string) *User {
+	var foundUser *User
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		if user.IP == ip {
+			foundUser = user
+			return false
+		}
+		return true
+	})
+	return foundUser
+}
+
+// Get user by ID
+func getUserByID(id string) *User {
+	if val, ok := users.Load(id); ok {
+		return val.(*User)
+	}
+	return nil
+}
+
+// Create new user
+func createUser(ip, name, description string, validDays int) (*User, error) {
+	id, err := generateUserID()
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	user := &User{
+		ID:          id,
+		IP:          ip,
+		Name:        name,
+		Description: description,
+		CreatedAt:   now,
+		ExpiresAt:   now.AddDate(0, 0, validDays),
+		IsActive:    true,
+		UsageCount:  0,
+		LastUsed:    time.Time{},
+	}
+
+	users.Store(id, user)
+	logger.Info("user created", "id", id, "ip", ip, "name", name, "expires", user.ExpiresAt)
+	return user, nil
+}
+
+// Update user expiration
+func extendUserExpiration(userID string, days int) error {
+	user := getUserByID(userID)
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	user.ExpiresAt = user.ExpiresAt.AddDate(0, 0, days)
+	users.Store(userID, user)
+	logger.Info("user expiration extended", "id", userID, "new_expiry", user.ExpiresAt)
+	return nil
+}
+
+// Deactivate user
+func deactivateUser(userID string) error {
+	user := getUserByID(userID)
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	user.IsActive = false
+	users.Store(userID, user)
+	logger.Info("user deactivated", "id", userID)
+	return nil
+}
+
+// Delete user
+func deleteUser(userID string) error {
+	if _, ok := users.Load(userID); !ok {
+		return errors.New("user not found")
+	}
+
+	users.Delete(userID)
+	logger.Info("user deleted", "id", userID)
+	return nil
+}
+
+// Create invite token
+func createInviteToken(createdBy string, validDays, maxUses int, tokenExpiryDays int) (*InviteToken, error) {
+	token, err := generateToken()
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	invite := &InviteToken{
+		Token:     token,
+		CreatedBy: createdBy,
+		CreatedAt: now,
+		ExpiresAt: now.AddDate(0, 0, tokenExpiryDays),
+		MaxUses:   maxUses,
+		UsedCount: 0,
+		ValidDays: validDays,
+		IsActive:  true,
+	}
+
+	inviteTokens.Store(token, invite)
+	logger.Info("invite token created", "token", token, "valid_days", validDays, "max_uses", maxUses)
+	return invite, nil
+}
+
+// Validate and use invite token
+func useInviteToken(token string) (*InviteToken, error) {
+	val, ok := inviteTokens.Load(token)
+	if !ok {
+		return nil, errors.New("invalid token")
+	}
+
+	invite := val.(*InviteToken)
+
+	if !invite.IsActive {
+		return nil, errors.New("token is inactive")
+	}
+
+	if time.Now().After(invite.ExpiresAt) {
+		return nil, errors.New("token expired")
+	}
+
+	if invite.MaxUses > 0 && invite.UsedCount >= invite.MaxUses {
+		return nil, errors.New("token usage limit reached")
+	}
+
+	invite.UsedCount++
+	inviteTokens.Store(token, invite)
+
+	return invite, nil
+}
+
+// Background task to check and deactivate expired users
+func startExpirationChecker(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkExpiredUsers()
+		}
+	}
+}
+
+func checkExpiredUsers() {
+	now := time.Now()
+	expiredCount := 0
+
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		if user.IsActive && now.After(user.ExpiresAt) {
+			user.IsActive = false
+			users.Store(key, user)
+			expiredCount++
+			logger.Info("user expired and deactivated", "id", user.ID, "name", user.Name, "expired_at", user.ExpiresAt)
+		}
+		return true
+	})
+
+	if expiredCount > 0 {
+		logger.Info("expired users check completed", "deactivated_count", expiredCount)
+	}
 }
 
 func createSession(username string) (string, error) {
@@ -697,8 +941,16 @@ func handleDoTConnection(conn net.Conn) {
 
 	metrics.IncDOTQueries()
 	clientAddr := conn.RemoteAddr().String()
+	clientIP, _, _ := net.SplitHostPort(clientAddr)
 
 	logger.Debug("DoT connection", "client", clientAddr)
+
+	// Check user-based authorization
+	if !isUserAuthorized(clientIP) {
+		logger.Warn("DoT user not authorized", "client", clientIP)
+		metrics.IncErrors()
+		return
+	}
 
 	if !limiter.Allow() {
 		logger.Warn("DoT global rate limit exceeded", "client", clientAddr)
@@ -1011,6 +1263,14 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 	clientIP := getClientIP(ctx)
 
 	logger.Debug("DoH request", "client", clientIP, "method", string(ctx.Method()))
+
+	// Check user-based authorization
+	if !isUserAuthorized(clientIP) {
+		logger.Warn("DoH user not authorized", "client", clientIP)
+		metrics.IncErrors()
+		ctx.Error("Access denied - Please register first", fasthttp.StatusForbidden)
+		return
+	}
 
 	// Check authentication
 	if !checkAuth(ctx) {
@@ -1439,6 +1699,526 @@ func handlePanelReload(ctx *fasthttp.RequestCtx) {
 	_, _ = ctx.WriteString(`{"status":"reloaded"}`)
 }
 
+// ======================== User Management API Handlers ========================
+
+func handlePanelUsers(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var userList []User
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		userList = append(userList, *user)
+		return true
+	})
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"users": userList,
+		"count": len(userList),
+	})
+}
+
+func handlePanelCreateUser(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		IP          string `json:"ip"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		ValidDays   int    `json:"valid_days"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.IP == "" || req.Name == "" || req.ValidDays <= 0 {
+		ctx.Error(`{"error":"Missing required fields"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Check if IP already registered
+	if getUserByIP(req.IP) != nil {
+		ctx.Error(`{"error":"IP already registered"}`, fasthttp.StatusConflict)
+		return
+	}
+
+	user, err := createUser(req.IP, req.Name, req.Description, req.ValidDays)
+	if err != nil {
+		logger.Error("failed to create user", "error", err)
+		ctx.Error(`{"error":"Failed to create user"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success": true,
+		"user":    user,
+	})
+}
+
+func handlePanelExtendUser(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		UserID string `json:"user_id"`
+		Days   int    `json:"days"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if err := extendUserExpiration(req.UserID, req.Days); err != nil {
+		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusNotFound)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"success":true}`)
+}
+
+func handlePanelDeactivateUser(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if err := deactivateUser(req.UserID); err != nil {
+		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusNotFound)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"success":true}`)
+}
+
+func handlePanelDeleteUser(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if err := deleteUser(req.UserID); err != nil {
+		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusNotFound)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"success":true}`)
+}
+
+func handlePanelCreateInvite(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		ValidDays       int `json:"valid_days"`        // Days of access for user
+		MaxUses         int `json:"max_uses"`          // Max times token can be used
+		TokenExpiryDays int `json:"token_expiry_days"` // Days until token expires
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.ValidDays <= 0 {
+		ctx.Error(`{"error":"valid_days must be positive"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.TokenExpiryDays <= 0 {
+		req.TokenExpiryDays = 7 // Default: token expires in 7 days
+	}
+
+	invite, err := createInviteToken("admin", req.ValidDays, req.MaxUses, req.TokenExpiryDays)
+	if err != nil {
+		logger.Error("failed to create invite", "error", err)
+		ctx.Error(`{"error":"Failed to create invite"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	cfg := getConfig()
+	registerURL := fmt.Sprintf("http://%s:%d/register?token=%s", cfg.Host, cfg.WebPanelPort, invite.Token)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success":      true,
+		"invite":       invite,
+		"register_url": registerURL,
+	})
+}
+
+func handlePanelListInvites(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var inviteList []InviteToken
+	inviteTokens.Range(func(key, value interface{}) bool {
+		invite := value.(*InviteToken)
+		inviteList = append(inviteList, *invite)
+		return true
+	})
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"invites": inviteList,
+		"count":   len(inviteList),
+	})
+}
+
+// ======================== Registration Handlers ========================
+
+func serveRegisterPage(ctx *fasthttp.RequestCtx) {
+	token := string(ctx.QueryArgs().Peek("token"))
+	if token == "" {
+		ctx.Error("Missing token", fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Validate token exists and is valid
+	val, ok := inviteTokens.Load(token)
+	if !ok {
+		ctx.Error("Invalid token", fasthttp.StatusNotFound)
+		return
+	}
+
+	invite := val.(*InviteToken)
+	if !invite.IsActive || time.Now().After(invite.ExpiresAt) {
+		ctx.Error("Token expired or inactive", fasthttp.StatusForbidden)
+		return
+	}
+
+	html := fmt.Sprintf(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register for DNS Access</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+        input, textarea {
+            width: 100%%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+        .info-box {
+            background: #f0f7ff;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .info-box p {
+            color: #333;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+        .info-box strong {
+            color: #667eea;
+        }
+        button {
+            width: 100%%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .message {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+        }
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .dns-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #fff3cd;
+            border-radius: 8px;
+            display: none;
+        }
+        .dns-info h3 {
+            color: #856404;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        .dns-info code {
+            background: #ffeaa7;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌐 DNS Access Registration</h1>
+        <p class="subtitle">Register your IP address to access our DNS services</p>
+
+        <div class="info-box">
+            <p><strong>Your IP:</strong> <span id="userIP">Loading...</span></p>
+            <p><strong>Access Duration:</strong> %d days</p>
+            <p><strong>Token Valid Until:</strong> %s</p>
+        </div>
+
+        <form id="registerForm">
+            <input type="hidden" name="token" value="%s">
+
+            <div class="form-group">
+                <label for="name">Name *</label>
+                <input type="text" id="name" name="name" required placeholder="Enter your name">
+            </div>
+
+            <div class="form-group">
+                <label for="description">Description (Optional)</label>
+                <textarea id="description" name="description" placeholder="e.g., Home connection, Office network"></textarea>
+            </div>
+
+            <button type="submit" id="submitBtn">Register</button>
+        </form>
+
+        <div class="message" id="message"></div>
+
+        <div class="dns-info" id="dnsInfo">
+            <h3>✅ Registration Successful!</h3>
+            <p>Configure your device to use our DNS:</p>
+            <p><strong>DoH:</strong> <code id="dohURL"></code></p>
+            <p><strong>DoT:</strong> <code id="dotServer"></code></p>
+        </div>
+    </div>
+
+    <script>
+        // Get client IP
+        fetch('/panel/api/health')
+            .then(r => r.json())
+            .then(data => {
+                // Try to extract IP from request
+                const ip = data.client_ip || 'Unknown';
+                document.getElementById('userIP').textContent = ip;
+            })
+            .catch(() => {
+                document.getElementById('userIP').textContent = 'Unable to detect';
+            });
+
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const submitBtn = document.getElementById('submitBtn');
+            const message = document.getElementById('message');
+            const dnsInfo = document.getElementById('dnsInfo');
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Registering...';
+            message.style.display = 'none';
+            dnsInfo.style.display = 'none';
+
+            const formData = {
+                token: document.querySelector('[name="token"]').value,
+                name: document.getElementById('name').value,
+                description: document.getElementById('description').value
+            };
+
+            try {
+                const response = await fetch('/register/submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    message.className = 'message success';
+                    message.textContent = 'Registration successful! You can now use our DNS services.';
+                    message.style.display = 'block';
+
+                    // Show DNS info
+                    dnsInfo.style.display = 'block';
+                    document.getElementById('dohURL').textContent = result.doh_url;
+                    document.getElementById('dotServer').textContent = result.dot_server;
+
+                    document.getElementById('registerForm').style.display = 'none';
+                } else {
+                    throw new Error(result.error || 'Registration failed');
+                }
+            } catch (error) {
+                message.className = 'message error';
+                message.textContent = error.message;
+                message.style.display = 'block';
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Register';
+            }
+        });
+    </script>
+</body>
+</html>
+`, invite.ValidDays, invite.ExpiresAt.Format("2006-01-02 15:04"), token)
+
+	ctx.SetContentType("text/html; charset=utf-8")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(html)
+}
+
+func handleRegisterSubmit(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		Token       string `json:"token"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.Token == "" || req.Name == "" {
+		ctx.Error(`{"error":"Missing required fields"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Validate and use token
+	invite, err := useInviteToken(req.Token)
+	if err != nil {
+		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusForbidden)
+		return
+	}
+
+	// Get client IP
+	clientIP := getClientIP(ctx)
+
+	// Check if IP already registered
+	if existingUser := getUserByIP(clientIP); existingUser != nil {
+		ctx.Error(`{"error":"Your IP is already registered"}`, fasthttp.StatusConflict)
+		return
+	}
+
+	// Create user
+	user, err := createUser(clientIP, req.Name, req.Description, invite.ValidDays)
+	if err != nil {
+		logger.Error("failed to create user during registration", "error", err)
+		ctx.Error(`{"error":"Failed to create user"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	cfg := getConfig()
+	dohURL := fmt.Sprintf("https://%s/dns-query", cfg.Host)
+	dotServer := fmt.Sprintf("%s:853", cfg.Host)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success":    true,
+		"user":       user,
+		"doh_url":    dohURL,
+		"dot_server": dotServer,
+		"expires_at": user.ExpiresAt,
+	})
+}
+
 func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -1488,6 +2268,24 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 				handlePanelRemoveDomain(c)
 			case "/panel/api/reload":
 				handlePanelReload(c)
+			case "/panel/api/users":
+				handlePanelUsers(c)
+			case "/panel/api/users/create":
+				handlePanelCreateUser(c)
+			case "/panel/api/users/extend":
+				handlePanelExtendUser(c)
+			case "/panel/api/users/deactivate":
+				handlePanelDeactivateUser(c)
+			case "/panel/api/users/delete":
+				handlePanelDeleteUser(c)
+			case "/panel/api/invite/create":
+				handlePanelCreateInvite(c)
+			case "/panel/api/invite/list":
+				handlePanelListInvites(c)
+			case "/register":
+				serveRegisterPage(c)
+			case "/register/submit":
+				handleRegisterSubmit(c)
 			default:
 				c.Error("Not found", fasthttp.StatusNotFound)
 			}
@@ -1603,6 +2401,12 @@ func main() {
 
 	// Setup signal handling
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+	// Start user expiration checker if user management is enabled
+	if cfg.UserManagement {
+		go startExpirationChecker(ctx)
+		logger.Info("user expiration checker started")
+	}
 	defer stop()
 
 	// Start all servers
