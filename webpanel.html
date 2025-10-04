@@ -452,13 +452,27 @@
                 <h2>🌐 Managed Domains</h2>
                 <div class="add-domain-form">
                     <input type="text" id="newDomain" placeholder="Domain (e.g., youtube.com)">
-                    <input type="text" id="newDomainIP" placeholder="IP Address">
                     <button onclick="addDomain()" class="btn btn-success btn-small">Add</button>
                 </div>
                 <div id="domainsList" class="domain-list">
                     <div class="loading">
                         <div class="spinner"></div>
                         Loading domains...
+                    </div>
+                </div>
+            </div>
+
+            <!-- User Management Panel -->
+            <div class="panel">
+                <h2>👥 User Management</h2>
+                <div style="margin-bottom: 20px;">
+                    <button onclick="showCreateInvite()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">Create Invite Link</button>
+                    <button onclick="loadUsers()" class="btn btn-primary" style="width: auto; padding: 10px 20px; margin-left: 10px;">Refresh Users</button>
+                </div>
+                <div id="usersList" class="domain-list">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading users...
                     </div>
                 </div>
             </div>
@@ -645,10 +659,9 @@
 
         async function addDomain() {
             const domain = document.getElementById('newDomain').value.trim();
-            const ip = document.getElementById('newDomainIP').value.trim();
 
-            if (!domain || !ip) {
-                alert('Please enter both domain and IP address');
+            if (!domain) {
+                alert('Please enter a domain');
                 return;
             }
 
@@ -659,12 +672,11 @@
                         'Content-Type': 'application/json',
                         'X-Session-ID': sessionId
                     },
-                    body: JSON.stringify({ domain, ip })
+                    body: JSON.stringify({ domain })
                 });
 
                 if (response.ok) {
                     document.getElementById('newDomain').value = '';
-                    document.getElementById('newDomainIP').value = '';
                     await loadDomains();
                 } else {
                     const data = await response.json();
@@ -750,6 +762,166 @@
             setTimeout(() => {
                 el.style.display = 'none';
             }, 5000);
+        }
+
+        // ========== User Management Functions ==========
+
+        async function loadUsers() {
+            try {
+                const response = await fetch('/panel/api/users', {
+                    headers: { 'X-Session-ID': sessionId }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    displayUsers(data.users || []);
+                } else {
+                    document.getElementById('usersList').innerHTML = '<p>Failed to load users</p>';
+                }
+            } catch (error) {
+                document.getElementById('usersList').innerHTML = '<p>Connection error</p>';
+            }
+        }
+
+        function displayUsers(users) {
+            const container = document.getElementById('usersList');
+
+            if (users.length === 0) {
+                container.innerHTML = '<p style="color: #666;">No users registered yet</p>';
+                return;
+            }
+
+            let html = '<table style="width: 100%; border-collapse: collapse;">';
+            html += '<tr style="background: #f5f5f5; text-align: left;"><th style="padding: 10px;">IP</th><th>Name</th><th>Expires</th><th>Status</th><th>Usage</th><th>Actions</th></tr>';
+
+            users.forEach(user => {
+                const isExpired = new Date(user.expires_at) < new Date();
+                const statusColor = user.is_active && !isExpired ? '#27ae60' : '#e74c3c';
+                const statusText = user.is_active && !isExpired ? 'Active' : 'Inactive';
+                const expiryDate = new Date(user.expires_at).toLocaleDateString();
+
+                html += `<tr style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 10px;">${user.ip}</td>
+                    <td>${user.name}</td>
+                    <td>${expiryDate}</td>
+                    <td><span style="color: ${statusColor};">● ${statusText}</span></td>
+                    <td>${user.usage_count || 0}</td>
+                    <td>
+                        <button onclick="extendUser('${user.id}')" style="padding: 5px 10px; margin: 2px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer;">Extend</button>
+                        <button onclick="deleteUser('${user.id}')" style="padding: 5px 10px; margin: 2px; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer;">Delete</button>
+                    </td>
+                </tr>`;
+            });
+
+            html += '</table>';
+            container.innerHTML = html;
+        }
+
+        async function extendUser(userId) {
+            const days = prompt('Extend by how many days?', '30');
+            if (!days || isNaN(days)) return;
+
+            try {
+                const response = await fetch('/panel/api/users/extend', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': sessionId
+                    },
+                    body: JSON.stringify({ user_id: userId, days: parseInt(days) })
+                });
+
+                if (response.ok) {
+                    alert('User extended successfully');
+                    await loadUsers();
+                } else {
+                    const data = await response.json();
+                    alert(data.error || 'Failed to extend user');
+                }
+            } catch (error) {
+                alert('Connection error');
+            }
+        }
+
+        async function deleteUser(userId) {
+            if (!confirm('Delete this user?')) return;
+
+            try {
+                const response = await fetch('/panel/api/users/delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': sessionId
+                    },
+                    body: JSON.stringify({ user_id: userId })
+                });
+
+                if (response.ok) {
+                    alert('User deleted successfully');
+                    await loadUsers();
+                } else {
+                    const data = await response.json();
+                    alert(data.error || 'Failed to delete user');
+                }
+            } catch (error) {
+                alert('Connection error');
+            }
+        }
+
+        async function showCreateInvite() {
+            const validDays = prompt('Access duration in days?', '30');
+            if (!validDays || isNaN(validDays)) return;
+
+            const maxUses = prompt('Maximum uses (0 for unlimited)?', '1');
+            if (maxUses === null) return;
+
+            const tokenExpiry = prompt('Token expiry in days?', '7');
+            if (!tokenExpiry || isNaN(tokenExpiry)) return;
+
+            try {
+                const response = await fetch('/panel/api/invite/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': sessionId
+                    },
+                    body: JSON.stringify({
+                        valid_days: parseInt(validDays),
+                        max_uses: parseInt(maxUses),
+                        token_expiry_days: parseInt(tokenExpiry)
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    const url = data.register_url;
+
+                    // Show in a nice dialog
+                    const dialog = `
+                        Registration Link Created!\n\n
+                        ${url}\n\n
+                        Valid for: ${validDays} days access\n
+                        Max uses: ${maxUses === 0 ? 'Unlimited' : maxUses}\n
+                        Token expires: ${tokenExpiry} days\n\n
+                        Click OK to copy to clipboard
+                    `;
+
+                    if (confirm(dialog)) {
+                        navigator.clipboard.writeText(url);
+                        alert('Link copied to clipboard!');
+                    }
+                } else {
+                    const data = await response.json();
+                    alert(data.error || 'Failed to create invite');
+                }
+            } catch (error) {
+                alert('Connection error');
+            }
+        }
+
+        // Load users on dashboard load
+        if (sessionId) {
+            loadUsers();
         }
     </script>
 </body>

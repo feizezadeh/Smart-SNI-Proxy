@@ -1589,24 +1589,11 @@ func handlePanelAddDomain(ctx *fasthttp.RequestCtx) {
 
 	var req struct {
 		Domain string `json:"domain"`
-		IP     string `json:"ip"`
 	}
 
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		ctx.Error(`{"error":"Invalid request"}`, fasthttp.StatusBadRequest)
 		return
-	}
-
-	// Validate IP
-	if net.ParseIP(req.IP) == nil {
-		ctx.Error(`{"error":"Invalid IP address"}`, fasthttp.StatusBadRequest)
-		return
-	}
-
-	// Add wildcard if not present
-	domain := req.Domain
-	if !strings.HasPrefix(domain, "*.") && !strings.Contains(domain, "*") {
-		domain = "*." + domain
 	}
 
 	// Read current config
@@ -1616,8 +1603,40 @@ func handlePanelAddDomain(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Add domain
-	cfg.Domains[domain] = req.IP
+	// Get server IP from existing domains or use first domain's IP
+	var serverIP string
+	for _, ip := range cfg.Domains {
+		if net.ParseIP(ip) != nil {
+			serverIP = ip
+			break
+		}
+	}
+
+	if serverIP == "" {
+		ctx.Error(`{"error":"No server IP found in config. Please add at least one domain first via install.sh"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Clean domain
+	domain := strings.TrimSpace(req.Domain)
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimSuffix(domain, "/")
+
+	if domain == "" {
+		ctx.Error(`{"error":"Domain cannot be empty"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Add both exact and wildcard patterns
+	if strings.HasPrefix(domain, "*.") || strings.Contains(domain, "*") {
+		// Already has wildcard, add as-is
+		cfg.Domains[domain] = serverIP
+	} else {
+		// Add both exact and wildcard
+		cfg.Domains[domain] = serverIP
+		cfg.Domains["*."+domain] = serverIP
+	}
 
 	// Save config
 	data, _ := json.MarshalIndent(cfg, "", "  ")
@@ -1631,7 +1650,7 @@ func handlePanelAddDomain(ctx *fasthttp.RequestCtx) {
 		logger.Error("failed to reload after adding domain", "error", err)
 	}
 
-	logger.Info("domain added via web panel", "domain", domain, "ip", req.IP)
+	logger.Info("domain added via web panel", "domain", domain, "wildcard", "*."+domain, "ip", serverIP)
 
 	ctx.SetContentType("application/json")
 	ctx.SetStatusCode(fasthttp.StatusOK)
