@@ -45,8 +45,8 @@ var (
 	config      atomic.Value // *Config - thread-safe config
 	limiter     *rate.Limiter
 	ipLimiters  sync.Map // map[string]*rate.Limiter - per-IP rate limiting
-	users       sync.Map // map[string]*User - user management
-	inviteTokens sync.Map // map[string]*InviteToken - invitation tokens
+	users       sync.Map // map[userID]*User - user management
+	ipToUser    sync.Map // map[IP]userID - IP to User mapping for fast lookup
 	dohURL      = "https://1.1.1.1/dns-query"
 	dohUpstream atomic.Value // []string - multiple upstream servers
 	dohClient   = &http.Client{
@@ -104,9 +104,10 @@ type Config struct {
 
 // User represents a registered user with IP-based access
 type User struct {
-	ID          string    `json:"id"`           // Unique user ID
-	IP          string    `json:"ip"`           // User's registered IP address
+	ID          string    `json:"id"`           // Unique user ID (also used as token)
 	Name        string    `json:"name"`         // User's name/identifier
+	IPs         []string  `json:"ips"`          // List of registered IPs (FIFO)
+	MaxIPs      int       `json:"max_ips"`      // Maximum number of IPs allowed
 	CreatedAt   time.Time `json:"created_at"`   // Registration time
 	ExpiresAt   time.Time `json:"expires_at"`   // Expiration time
 	IsActive    bool      `json:"is_active"`    // Active status
@@ -115,17 +116,6 @@ type User struct {
 	LastUsed    time.Time `json:"last_used"`    // Last query time
 }
 
-// InviteToken represents an invitation token for user registration
-type InviteToken struct {
-	Token       string    `json:"token"`        // Unique token
-	CreatedBy   string    `json:"created_by"`   // Admin who created it
-	CreatedAt   time.Time `json:"created_at"`   // Creation time
-	ExpiresAt   time.Time `json:"expires_at"`   // Token expiration
-	MaxIPs      int       `json:"max_ips"`      // Maximum number of IPs allowed (0 = unlimited)
-	UsedIPs     []string  `json:"used_ips"`     // List of registered IPs
-	ValidDays   int       `json:"valid_days"`   // Days of access for registered user
-	IsActive    bool      `json:"is_active"`    // Active status
-}
 
 // Metrics holds runtime statistics
 type Metrics struct {
@@ -368,39 +358,42 @@ func isUserAuthorized(ip string) bool {
 		return true // User management disabled, allow all
 	}
 
-	// Check if IP has valid user registration
-	var authorized bool
-	users.Range(func(key, value interface{}) bool {
-		user := value.(*User)
-		if user.IP == ip && user.IsActive {
-			// Check expiration
-			if time.Now().Before(user.ExpiresAt) {
-				authorized = true
-				// Update usage stats
-				user.UsageCount++
-				user.LastUsed = time.Now()
-				users.Store(key, user)
-				return false // stop iteration
-			}
-		}
-		return true // continue iteration
-	})
+	// Fast lookup using ipToUser map
+	userIDVal, ok := ipToUser.Load(ip)
+	if !ok {
+		return false // IP not registered
+	}
 
-	return authorized
+	userID := userIDVal.(string)
+	userVal, ok := users.Load(userID)
+	if !ok {
+		return false // User not found
+	}
+
+	user := userVal.(*User)
+
+	// Check if user is active and not expired
+	if !user.IsActive || time.Now().After(user.ExpiresAt) {
+		return false
+	}
+
+	// Update usage stats
+	user.UsageCount++
+	user.LastUsed = time.Now()
+	users.Store(userID, user)
+
+	return true
 }
 
-// Get user by IP
+// Get user by IP (fast lookup)
 func getUserByIP(ip string) *User {
-	var foundUser *User
-	users.Range(func(key, value interface{}) bool {
-		user := value.(*User)
-		if user.IP == ip {
-			foundUser = user
-			return false
-		}
-		return true
-	})
-	return foundUser
+	userIDVal, ok := ipToUser.Load(ip)
+	if !ok {
+		return nil
+	}
+
+	userID := userIDVal.(string)
+	return getUserByID(userID)
 }
 
 // Get user by ID
@@ -412,7 +405,7 @@ func getUserByID(id string) *User {
 }
 
 // Create new user
-func createUser(ip, name, description string, validDays int) (*User, error) {
+func createUser(name, description string, maxIPs, validDays int) (*User, error) {
 	id, err := generateUserID()
 	if err != nil {
 		return nil, err
@@ -421,8 +414,9 @@ func createUser(ip, name, description string, validDays int) (*User, error) {
 	now := time.Now()
 	user := &User{
 		ID:          id,
-		IP:          ip,
 		Name:        name,
+		IPs:         []string{},
+		MaxIPs:      maxIPs,
 		Description: description,
 		CreatedAt:   now,
 		ExpiresAt:   now.AddDate(0, 0, validDays),
@@ -432,7 +426,7 @@ func createUser(ip, name, description string, validDays int) (*User, error) {
 	}
 
 	users.Store(id, user)
-	logger.Info("user created", "id", id, "ip", ip, "name", name, "expires", user.ExpiresAt)
+	logger.Info("user created", "id", id, "name", name, "max_ips", maxIPs, "expires", user.ExpiresAt)
 	return user, nil
 }
 
@@ -464,8 +458,14 @@ func deactivateUser(userID string) error {
 
 // Delete user
 func deleteUser(userID string) error {
-	if _, ok := users.Load(userID); !ok {
+	user := getUserByID(userID)
+	if user == nil {
 		return errors.New("user not found")
+	}
+
+	// Remove all IP mappings
+	for _, ip := range user.IPs {
+		ipToUser.Delete(ip)
 	}
 
 	users.Delete(userID)
@@ -473,65 +473,46 @@ func deleteUser(userID string) error {
 	return nil
 }
 
-// Create invite token
-func createInviteToken(createdBy string, validDays, maxIPs int, tokenExpiryDays int) (*InviteToken, error) {
-	token, err := generateToken()
-	if err != nil {
-		return nil, err
+// Add IP to user (FIFO - removes oldest if limit reached)
+func addIPToUser(userID, clientIP string) error {
+	user := getUserByID(userID)
+	if user == nil {
+		return errors.New("user not found")
 	}
 
-	now := time.Now()
-	invite := &InviteToken{
-		Token:     token,
-		CreatedBy: createdBy,
-		CreatedAt: now,
-		ExpiresAt: now.AddDate(0, 0, tokenExpiryDays),
-		MaxIPs:    maxIPs,
-		UsedIPs:   []string{},
-		ValidDays: validDays,
-		IsActive:  true,
+	if !user.IsActive {
+		return errors.New("user is inactive")
 	}
 
-	inviteTokens.Store(token, invite)
-	logger.Info("invite token created", "token", token, "valid_days", validDays, "max_ips", maxIPs)
-	return invite, nil
-}
-
-// Validate and use invite token for IP registration
-func useInviteToken(token, userIP string) (*InviteToken, error) {
-	val, ok := inviteTokens.Load(token)
-	if !ok {
-		return nil, errors.New("invalid token")
+	if time.Now().After(user.ExpiresAt) {
+		return errors.New("user expired")
 	}
 
-	invite := val.(*InviteToken)
-
-	if !invite.IsActive {
-		return nil, errors.New("token is inactive")
-	}
-
-	if time.Now().After(invite.ExpiresAt) {
-		return nil, errors.New("token expired")
-	}
-
-	// Check if IP already registered with this token
-	for _, ip := range invite.UsedIPs {
-		if ip == userIP {
-			return nil, errors.New("IP already registered with this token")
+	// Check if IP already registered
+	for _, ip := range user.IPs {
+		if ip == clientIP {
+			logger.Info("IP already registered for user", "user_id", userID, "ip", clientIP)
+			return nil // Already registered, no error
 		}
 	}
 
-	// Check if max IPs limit reached
-	if invite.MaxIPs > 0 && len(invite.UsedIPs) >= invite.MaxIPs {
-		return nil, errors.New("token IP limit reached")
+	// If max IPs reached, remove the oldest (FIFO)
+	if len(user.IPs) >= user.MaxIPs && user.MaxIPs > 0 {
+		oldestIP := user.IPs[0]
+		user.IPs = user.IPs[1:] // Remove first element
+		ipToUser.Delete(oldestIP)
+		logger.Info("removed oldest IP (FIFO)", "user_id", userID, "old_ip", oldestIP)
 	}
 
-	// Add IP to used list
-	invite.UsedIPs = append(invite.UsedIPs, userIP)
-	inviteTokens.Store(token, invite)
+	// Add new IP
+	user.IPs = append(user.IPs, clientIP)
+	ipToUser.Store(clientIP, userID)
+	users.Store(userID, user)
 
-	return invite, nil
+	logger.Info("IP added to user", "user_id", userID, "ip", clientIP, "total_ips", len(user.IPs))
+	return nil
 }
+
 
 // Background task to check and deactivate expired users
 func startExpirationChecker(ctx context.Context) {
@@ -1756,9 +1737,9 @@ func handlePanelCreateUser(ctx *fasthttp.RequestCtx) {
 	}
 
 	var req struct {
-		IP          string `json:"ip"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		MaxIPs      int    `json:"max_ips"`
 		ValidDays   int    `json:"valid_days"`
 	}
 
@@ -1767,29 +1748,27 @@ func handlePanelCreateUser(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if req.IP == "" || req.Name == "" || req.ValidDays <= 0 {
+	if req.Name == "" || req.MaxIPs <= 0 || req.ValidDays <= 0 {
 		ctx.Error(`{"error":"Missing required fields"}`, fasthttp.StatusBadRequest)
 		return
 	}
 
-	// Check if IP already registered
-	if getUserByIP(req.IP) != nil {
-		ctx.Error(`{"error":"IP already registered"}`, fasthttp.StatusConflict)
-		return
-	}
-
-	user, err := createUser(req.IP, req.Name, req.Description, req.ValidDays)
+	user, err := createUser(req.Name, req.Description, req.MaxIPs, req.ValidDays)
 	if err != nil {
 		logger.Error("failed to create user", "error", err)
 		ctx.Error(`{"error":"Failed to create user"}`, fasthttp.StatusInternalServerError)
 		return
 	}
 
+	cfg := getConfig()
+	registerURL := fmt.Sprintf("http://%s:%d/register?token=%s", cfg.Host, cfg.WebPanelPort, user.ID)
+
 	ctx.SetContentType("application/json")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"success": true,
-		"user":    user,
+		"success":      true,
+		"user":         user,
+		"register_url": registerURL,
 	})
 }
 
@@ -1866,69 +1845,6 @@ func handlePanelDeleteUser(ctx *fasthttp.RequestCtx) {
 	_, _ = ctx.WriteString(`{"success":true}`)
 }
 
-func handlePanelCreateInvite(ctx *fasthttp.RequestCtx) {
-	if !requirePanelAuth(ctx) {
-		return
-	}
-
-	var req struct {
-		ValidDays       int `json:"valid_days"`        // Days of access for user
-		MaxIPs          int `json:"max_ips"`           // Max IPs allowed to register
-		TokenExpiryDays int `json:"token_expiry_days"` // Days until token expires
-	}
-
-	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
-		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
-		return
-	}
-
-	if req.ValidDays <= 0 {
-		ctx.Error(`{"error":"valid_days must be positive"}`, fasthttp.StatusBadRequest)
-		return
-	}
-
-	if req.TokenExpiryDays <= 0 {
-		req.TokenExpiryDays = 7 // Default: token expires in 7 days
-	}
-
-	invite, err := createInviteToken("admin", req.ValidDays, req.MaxIPs, req.TokenExpiryDays)
-	if err != nil {
-		logger.Error("failed to create invite", "error", err)
-		ctx.Error(`{"error":"Failed to create invite"}`, fasthttp.StatusInternalServerError)
-		return
-	}
-
-	cfg := getConfig()
-	registerURL := fmt.Sprintf("http://%s:%d/register?token=%s", cfg.Host, cfg.WebPanelPort, invite.Token)
-
-	ctx.SetContentType("application/json")
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"success":      true,
-		"invite":       invite,
-		"register_url": registerURL,
-	})
-}
-
-func handlePanelListInvites(ctx *fasthttp.RequestCtx) {
-	if !requirePanelAuth(ctx) {
-		return
-	}
-
-	var inviteList []InviteToken
-	inviteTokens.Range(func(key, value interface{}) bool {
-		invite := value.(*InviteToken)
-		inviteList = append(inviteList, *invite)
-		return true
-	})
-
-	ctx.SetContentType("application/json")
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	json.NewEncoder(ctx).Encode(map[string]interface{}{
-		"invites": inviteList,
-		"count":   len(inviteList),
-	})
-}
 
 // ======================== Registration Handlers ========================
 
@@ -1939,18 +1855,20 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Validate token exists and is valid
-	val, ok := inviteTokens.Load(token)
-	if !ok {
+	// Validate user exists and is valid
+	user := getUserByID(token)
+	if user == nil {
 		ctx.Error("Invalid token", fasthttp.StatusNotFound)
 		return
 	}
 
-	invite := val.(*InviteToken)
-	if !invite.IsActive || time.Now().After(invite.ExpiresAt) {
-		ctx.Error("Token expired or inactive", fasthttp.StatusForbidden)
+	if !user.IsActive || time.Now().After(user.ExpiresAt) {
+		ctx.Error("User expired or inactive", fasthttp.StatusForbidden)
 		return
 	}
+
+	// Get client IP
+	clientIP := getClientIP(ctx)
 
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -2089,25 +2007,17 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
         <p class="subtitle">Register your IP address to access our DNS services</p>
 
         <div class="info-box">
-            <p><strong>Your IP:</strong> <span id="userIP">Loading...</span></p>
-            <p><strong>Access Duration:</strong> %d days</p>
-            <p><strong>Token Valid Until:</strong> %s</p>
+            <p><strong>Your IP:</strong> <span id="userIP">%s</span></p>
+            <p><strong>User:</strong> %s</p>
+            <p><strong>Max IPs:</strong> %d</p>
+            <p><strong>Current IPs:</strong> %d / %d</p>
+            <p><strong>Expires:</strong> %s</p>
         </div>
 
         <form id="registerForm">
             <input type="hidden" name="token" value="%s">
 
-            <div class="form-group">
-                <label for="name">Name *</label>
-                <input type="text" id="name" name="name" required placeholder="Enter your name">
-            </div>
-
-            <div class="form-group">
-                <label for="description">Description (Optional)</label>
-                <textarea id="description" name="description" placeholder="e.g., Home connection, Office network"></textarea>
-            </div>
-
-            <button type="submit" id="submitBtn">Register</button>
+            <button type="submit" id="submitBtn">Register This IP</button>
         </form>
 
         <div class="message" id="message"></div>
@@ -2121,18 +2031,6 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
     </div>
 
     <script>
-        // Get client IP
-        fetch('/panel/api/health')
-            .then(r => r.json())
-            .then(data => {
-                // Try to extract IP from request
-                const ip = data.client_ip || 'Unknown';
-                document.getElementById('userIP').textContent = ip;
-            })
-            .catch(() => {
-                document.getElementById('userIP').textContent = 'Unable to detect';
-            });
-
         document.getElementById('registerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
@@ -2146,9 +2044,7 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
             dnsInfo.style.display = 'none';
 
             const formData = {
-                token: document.querySelector('[name="token"]').value,
-                name: document.getElementById('name').value,
-                description: document.getElementById('description').value
+                token: document.querySelector('[name="token"]').value
             };
 
             try {
@@ -2185,7 +2081,7 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
     </script>
 </body>
 </html>
-`, invite.ValidDays, invite.ExpiresAt.Format("2006-01-02 15:04"), token)
+`, clientIP, user.Name, user.MaxIPs, len(user.IPs), user.MaxIPs, user.ExpiresAt.Format("2006-01-02 15:04"), token)
 
 	ctx.SetContentType("text/html; charset=utf-8")
 	ctx.SetStatusCode(fasthttp.StatusOK)
@@ -2194,9 +2090,7 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
 
 func handleRegisterSubmit(ctx *fasthttp.RequestCtx) {
 	var req struct {
-		Token       string `json:"token"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Token string `json:"token"` // User ID used as token
 	}
 
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
@@ -2204,32 +2098,25 @@ func handleRegisterSubmit(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if req.Token == "" || req.Name == "" {
-		ctx.Error(`{"error":"Missing required fields"}`, fasthttp.StatusBadRequest)
+	if req.Token == "" {
+		ctx.Error(`{"error":"Missing token"}`, fasthttp.StatusBadRequest)
 		return
 	}
 
 	// Get client IP
 	clientIP := getClientIP(ctx)
 
-	// Validate and use token with IP
-	invite, err := useInviteToken(req.Token, clientIP)
+	// Add IP to user (with FIFO logic)
+	err := addIPToUser(req.Token, clientIP)
 	if err != nil {
 		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusForbidden)
 		return
 	}
 
-	// Check if IP already registered
-	if existingUser := getUserByIP(clientIP); existingUser != nil {
-		ctx.Error(`{"error":"Your IP is already registered"}`, fasthttp.StatusConflict)
-		return
-	}
-
-	// Create user
-	user, err := createUser(clientIP, req.Name, req.Description, invite.ValidDays)
-	if err != nil {
-		logger.Error("failed to create user during registration", "error", err)
-		ctx.Error(`{"error":"Failed to create user"}`, fasthttp.StatusInternalServerError)
+	// Get user info
+	user := getUserByID(req.Token)
+	if user == nil {
+		ctx.Error(`{"error":"User not found"}`, fasthttp.StatusNotFound)
 		return
 	}
 
@@ -2307,10 +2194,6 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 				handlePanelDeactivateUser(c)
 			case "/panel/api/users/delete":
 				handlePanelDeleteUser(c)
-			case "/panel/api/invite/create":
-				handlePanelCreateInvite(c)
-			case "/panel/api/invite/list":
-				handlePanelListInvites(c)
 			case "/register":
 				serveRegisterPage(c)
 			case "/register/submit":

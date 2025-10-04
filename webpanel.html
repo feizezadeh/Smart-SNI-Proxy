@@ -466,14 +466,11 @@
             <div class="panel">
                 <h2>👥 User Management</h2>
                 <div style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button onclick="showCreateInviteDialog()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">
-                        🔗 Create Invite Link
+                    <button onclick="showCreateUserDialog()" class="btn btn-success" style="width: auto; padding: 10px 20px;">
+                        ➕ Create User
                     </button>
                     <button onclick="loadUsers()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">
                         🔄 Refresh Users
-                    </button>
-                    <button onclick="showInvitesList()" class="btn btn-primary" style="width: auto; padding: 10px 20px;">
-                        📋 View Invites
                     </button>
                 </div>
                 <div id="usersList" class="domain-list">
@@ -484,59 +481,55 @@
                 </div>
             </div>
 
-            <!-- Create Invite Dialog (Hidden) -->
-            <div id="createInviteDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+            <!-- Create User Dialog (Hidden) -->
+            <div id="createUserDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
                 <div style="background: white; border-radius: 15px; padding: 30px; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
-                    <h3 style="margin-bottom: 20px; color: #667eea;">🔗 Create Invitation Link</h3>
+                    <h3 style="margin-bottom: 20px; color: #667eea;">➕ Create New User</h3>
                     <div style="margin-bottom: 15px;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">🕐 Access Duration (days) *</label>
-                        <input type="number" id="inviteValidDays" value="30" min="1" max="365" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
-                        <small style="color: #666;">How many days users will have access to DNS services</small>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">👤 Name *</label>
+                        <input type="text" id="userName" placeholder="e.g., John Doe" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                        <small style="color: #666;">User's name or identifier</small>
                     </div>
                     <div style="margin-bottom: 15px;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">👥 Maximum IPs Allowed *</label>
-                        <input type="number" id="inviteMaxIPs" value="5" min="0" max="1000" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
-                        <small style="color: #666;">Maximum number of IPs that can register with this token (0 = unlimited)</small>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">📝 Description</label>
+                        <textarea id="userDescription" placeholder="Optional description" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; min-height: 60px;"></textarea>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">👥 Maximum IPs *</label>
+                        <input type="number" id="userMaxIPs" value="3" min="1" max="100" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                        <small style="color: #666;">Maximum number of IPs user can register (FIFO)</small>
                     </div>
                     <div style="margin-bottom: 20px;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">⏰ Token Expiry (days) *</label>
-                        <input type="number" id="inviteTokenExpiry" value="7" min="1" max="90" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
-                        <small style="color: #666;">How many days until this invitation link expires</small>
+                        <label style="display: block; margin-bottom: 5px; font-weight: 500;">🕐 Valid Days *</label>
+                        <input type="number" id="userValidDays" value="30" min="1" max="365" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px;">
+                        <small style="color: #666;">How many days user will have access</small>
                     </div>
                     <div style="display: flex; gap: 10px;">
-                        <button onclick="createInviteLink()" class="btn btn-success" style="flex: 1;">🔗 Create Link</button>
-                        <button onclick="closeCreateInviteDialog()" class="btn" style="flex: 1; background: #95a5a6;">Cancel</button>
+                        <button onclick="createUser()" class="btn btn-success" style="flex: 1;">➕ Create User</button>
+                        <button onclick="closeCreateUserDialog()" class="btn" style="flex: 1; background: #95a5a6;">Cancel</button>
                     </div>
                 </div>
             </div>
 
-            <!-- Invite Result Dialog (Hidden) -->
-            <div id="inviteResultDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; align-items: center; justify-content: center;">
+            <!-- User Result Dialog (Hidden) -->
+            <div id="userResultDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1001; align-items: center; justify-content: center;">
                 <div style="background: white; border-radius: 15px; padding: 30px; max-width: 600px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
-                    <h3 style="margin-bottom: 20px; color: #27ae60;">✅ Invitation Link Created!</h3>
+                    <h3 style="margin-bottom: 20px; color: #27ae60;">✅ User Created Successfully!</h3>
                     <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
                         <label style="display: block; margin-bottom: 5px; font-weight: 500; color: #666;">Registration Link:</label>
                         <div style="display: flex; gap: 10px; align-items: center;">
-                            <input type="text" id="inviteLinkResult" readonly style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 13px;">
-                            <button onclick="copyInviteLink()" class="btn btn-primary" style="width: auto; padding: 10px 15px;">📋 Copy</button>
+                            <input type="text" id="userLinkResult" readonly style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 13px;">
+                            <button onclick="copyUserLink()" class="btn btn-primary" style="width: auto; padding: 10px 15px;">📋 Copy</button>
                         </div>
                     </div>
                     <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; border-left: 4px solid #27ae60; margin-bottom: 20px;">
-                        <p style="margin: 0 0 10px 0; font-weight: 500;">📋 Token Details:</p>
-                        <p style="margin: 5px 0; font-size: 14px;">• Access Duration: <strong id="resultValidDays"></strong> days</p>
-                        <p style="margin: 5px 0; font-size: 14px;">• Max IPs Allowed: <strong id="resultMaxIPs"></strong></p>
-                        <p style="margin: 5px 0; font-size: 14px;">• Token Expires: <strong id="resultTokenExpiry"></strong> days</p>
+                        <p style="margin: 0 0 10px 0; font-weight: 500;">📋 User Details:</p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Name: <strong id="resultUserName"></strong></p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Max IPs: <strong id="resultUserMaxIPs"></strong></p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Valid Days: <strong id="resultUserValidDays"></strong> days</p>
+                        <p style="margin: 5px 0; font-size: 14px;">• Expires: <strong id="resultUserExpires"></strong></p>
                     </div>
-                    <button onclick="closeInviteResultDialog()" class="btn btn-primary" style="width: 100%;">Close</button>
-                </div>
-            </div>
-
-            <!-- Invites List Dialog (Hidden) -->
-            <div id="invitesDialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
-                <div style="background: white; border-radius: 15px; padding: 30px; max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
-                    <h3 style="margin-bottom: 20px; color: #667eea;">📋 Invitation Tokens</h3>
-                    <div id="invitesListContent">Loading...</div>
-                    <button onclick="closeInvitesDialog()" class="btn btn-primary" style="margin-top: 20px; width: auto; padding: 10px 20px;">Close</button>
+                    <button onclick="closeUserResultDialog()" class="btn btn-primary" style="width: 100%;">Close</button>
                 </div>
             </div>
 
