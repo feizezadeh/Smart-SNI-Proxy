@@ -1,0 +1,102 @@
+==============================================
+دستورات برای اجرا روی سرور
+SSH: ssh root@89.47.113.135
+Password: Mefe160502@136525
+==============================================
+
+# مرحله 1: رفتن به دایرکتوری و دریافت تغییرات
+cd /root/smartSNI
+git fetch origin
+git reset --hard origin/main
+
+# مرحله 2: Fix کردن config
+SERVER_IP=$(hostname -I | awk '{print $1}')
+sed -i "s/<YOUR_IP>/$SERVER_IP/g" config.json
+sed -i 's/<YOUR_HOST>/your-domain.com/g' config.json
+
+# مرحله 3: بررسی config
+cat config.json | jq '.'
+
+# اگر خطا داشت، این دستور را اجرا کنید:
+# cat config.json
+
+# مرحله 4: Build
+/usr/local/go/bin/go build -o smartsni main.go
+
+# مرحله 5: Restart
+systemctl restart sni.service
+
+# مرحله 6: بررسی وضعیت
+systemctl status sni.service
+
+# مرحله 7: بررسی پورت
+ss -tulnp | grep 8088
+
+# مرحله 8: مشاهده لاگ
+journalctl -u sni.service -n 20
+
+==============================================
+اگر همه چیز OK بود، باید این پیام‌ها را ببینید:
+==============================================
+
+✅ systemctl status: "active (running)"
+✅ ss -tulnp: یک خط با "0.0.0.0:8088"
+✅ logs: "web panel started"
+
+==============================================
+تست در مرورگر:
+==============================================
+
+🌐 http://89.47.113.135:8088/panel
+Username: admin
+Password: admin
+
+در Dashboard باید این بخش‌ها را ببینید:
+- 📊 Metrics
+- 🌐 Managed Domains (بدون فیلد IP)
+- 👥 User Management (با دکمه Create Invite Link)
+- ⚙️ System Information
+
+==============================================
+تست اضافه کردن دامین:
+==============================================
+
+1. در بخش "Managed Domains"
+2. فقط نام دامین بنویسید: test.com
+3. کلیک Add
+4. باید هم test.com و هم *.test.com اضافه شود
+
+==============================================
+تست User Management:
+==============================================
+
+1. در بخش "User Management"
+2. کلیک "Create Invite Link"
+3. وارد کنید: 30 روز
+4. وارد کنید: 1 استفاده
+5. وارد کنید: 7 روز انقضا
+6. باید لینک ثبت‌نام نمایش داده شود
+
+==============================================
+اگر خطا دادند:
+==============================================
+
+# خطا: "Failed to load config"
+cat /root/smartSNI/config.json | jq '.'
+# اگر خطا داشت، JSON معتبر نیست
+
+# خطا: "Connection error"
+journalctl -u sni.service -n 30
+# ببینید کدام API خطا می‌دهد
+
+# خطا: Service کرش می‌کند
+journalctl -u sni.service -n 50
+# معمولاً مشکل از config است
+
+==============================================
+دستور یک‌خطی (همه با هم):
+==============================================
+
+cd /root/smartSNI && git reset --hard origin/main && sed -i "s/<YOUR_IP>/$(hostname -I | awk '{print $1}')/g" config.json && sed -i 's/<YOUR_HOST>/your-domain.com/g' config.json && /usr/local/go/bin/go build -o smartsni main.go && systemctl restart sni.service && sleep 2 && systemctl status sni.service --no-pager && ss -tulnp | grep 8088
+
+==============================================
