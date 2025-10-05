@@ -183,6 +183,19 @@ func LoadConfig(filename string) (*Config, error) {
 	return &c, nil
 }
 
+func SaveConfig(filename string, c *Config) error {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
 func validateConfig(c *Config) error {
 	if c.Host == "" {
 		return errors.New("host cannot be empty")
@@ -1964,6 +1977,104 @@ func handlePanelDeleteUser(ctx *fasthttp.RequestCtx) {
 	_, _ = ctx.WriteString(`{"success":true}`)
 }
 
+func handlePanelChangePassword(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.CurrentPassword == "" || req.NewPassword == "" {
+		ctx.Error(`{"error":"Current password and new password are required"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	cfg := getConfig()
+
+	// Verify current password
+	currentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.CurrentPassword)))
+	if currentHash != cfg.WebPanelPassword {
+		ctx.Error(`{"error":"Current password is incorrect"}`, fasthttp.StatusUnauthorized)
+		return
+	}
+
+	// Hash new password
+	newHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.NewPassword)))
+
+	// Update config
+	cfg.WebPanelPassword = newHash
+	config.Store(cfg)
+
+	// Save to file
+	if err := SaveConfig("config.json", cfg); err != nil {
+		logger.Error("failed to save config after password change", "error", err)
+		ctx.Error(`{"error":"Failed to save new password"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("web panel password changed", "username", cfg.WebPanelUsername)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"success":true,"message":"Password changed successfully"}`)
+}
+
+func handlePanelChangeUsername(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		Password    string `json:"password"`
+		NewUsername string `json:"new_username"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.Password == "" || req.NewUsername == "" {
+		ctx.Error(`{"error":"Password and new username are required"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	cfg := getConfig()
+
+	// Verify password
+	passwordHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Password)))
+	if passwordHash != cfg.WebPanelPassword {
+		ctx.Error(`{"error":"Password is incorrect"}`, fasthttp.StatusUnauthorized)
+		return
+	}
+
+	oldUsername := cfg.WebPanelUsername
+
+	// Update config
+	cfg.WebPanelUsername = req.NewUsername
+	config.Store(cfg)
+
+	// Save to file
+	if err := SaveConfig("config.json", cfg); err != nil {
+		logger.Error("failed to save config after username change", "error", err)
+		ctx.Error(`{"error":"Failed to save new username"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("web panel username changed", "old_username", oldUsername, "new_username", req.NewUsername)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"success":true,"message":"Username changed successfully"}`)
+}
 
 // ======================== Registration Handlers ========================
 
@@ -2313,6 +2424,10 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 				handlePanelDeactivateUser(c)
 			case "/panel/api/users/delete":
 				handlePanelDeleteUser(c)
+			case "/panel/api/settings/change-password":
+				handlePanelChangePassword(c)
+			case "/panel/api/settings/change-username":
+				handlePanelChangeUsername(c)
 			case "/register":
 				serveRegisterPage(c)
 			case "/register/submit":
