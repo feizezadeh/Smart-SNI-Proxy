@@ -1215,7 +1215,8 @@ func serveSniProxy(ctx context.Context, wg *sync.WaitGroup) {
 	ln, err := net.Listen("tcp", ":443")
 	if err != nil {
 		logger.Error("SNI: failed to listen", "error", err)
-		log.Fatal("SNI: listen:", err)
+		logger.Warn("SNI proxy disabled due to port conflict")
+		return
 	}
 	logger.Info("SNI proxy started", "port", 443)
 
