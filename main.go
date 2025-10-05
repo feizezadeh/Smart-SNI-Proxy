@@ -86,6 +86,7 @@ type Config struct {
 	Host              string            `json:"host"`
 	Domains           map[string]string `json:"domains"` // pattern -> IP (supports exact or "*.example.com")
 	SNIPort           int               `json:"sni_port,omitempty"`           // SNI proxy port (default 443)
+	DNSEnabled        bool              `json:"dns_enabled,omitempty"`        // Enable standard DNS on port 53
 	UpstreamDOH       []string          `json:"upstream_doh,omitempty"`
 	AuthTokens        []string          `json:"auth_tokens,omitempty"`
 	EnableAuth        bool              `json:"enable_auth,omitempty"`
@@ -1059,6 +1060,116 @@ func startDoTServer(ctx context.Context, wg *sync.WaitGroup) {
 		}
 		go handleDoTConnection(c)
 	}
+}
+
+// ======================== Standard DNS Server (Port 53) ========================
+
+func startDNSServer(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	// Start UDP DNS server
+	udpAddr, err := net.ResolveUDPAddr("udp", ":53")
+	if err != nil {
+		logger.Error("DNS: failed to resolve UDP address", "error", err)
+		return
+	}
+
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		logger.Error("DNS: failed to listen on UDP:53", "error", err)
+		logger.Warn("DNS: standard DNS server disabled (port 53 unavailable)")
+		return
+	}
+	defer udpConn.Close()
+
+	// Start TCP DNS server
+	tcpAddr, err := net.ResolveTCPAddr("tcp", ":53")
+	if err != nil {
+		logger.Error("DNS: failed to resolve TCP address", "error", err)
+		return
+	}
+
+	tcpListener, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		logger.Error("DNS: failed to listen on TCP:53", "error", err)
+		return
+	}
+	defer tcpListener.Close()
+
+	logger.Info("DNS server started", "port", 53, "protocols", "UDP/TCP")
+
+	// Handle shutdown
+	go func() {
+		<-ctx.Done()
+		logger.Info("DNS server shutting down")
+		udpConn.Close()
+		tcpListener.Close()
+	}()
+
+	// Start TCP handler in goroutine
+	go func() {
+		for {
+			conn, err := tcpListener.Accept()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.Warn("DNS TCP accept error", "error", err)
+				continue
+			}
+			go handleDNSTCP(conn)
+		}
+	}()
+
+	// Handle UDP requests
+	buf := make([]byte, 512)
+	for {
+		n, addr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+		go handleDNSUDP(udpConn, addr, buf[:n])
+	}
+}
+
+func handleDNSUDP(conn *net.UDPConn, addr *net.UDPAddr, query []byte) {
+	response, err := processDNSQuery(query)
+	if err != nil {
+		logger.Debug("DNS UDP query failed", "error", err, "client", addr.String())
+		return
+	}
+	_, _ = conn.WriteToUDP(response, addr)
+}
+
+func handleDNSTCP(conn net.Conn) {
+	defer conn.Close()
+
+	// Read DNS message length (2 bytes)
+	lenBuf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, lenBuf); err != nil {
+		return
+	}
+	msgLen := binary.BigEndian.Uint16(lenBuf)
+
+	// Read DNS query
+	query := make([]byte, msgLen)
+	if _, err := io.ReadFull(conn, query); err != nil {
+		return
+	}
+
+	response, err := processDNSQuery(query)
+	if err != nil {
+		return
+	}
+
+	// Write response length + response
+	respLen := make([]byte, 2)
+	binary.BigEndian.PutUint16(respLen, uint16(len(response)))
+	conn.Write(respLen)
+	conn.Write(response)
 }
 
 // ======================== TLS SNI Peek ========================
@@ -2333,6 +2444,11 @@ func main() {
 	var wg sync.WaitGroup
 	serverCount := 3
 
+	// Check if DNS server should be started
+	if cfg.DNSEnabled {
+		serverCount++
+	}
+
 	// Check if web panel should be started
 	if cfg.WebPanelEnabled && cfg.WebPanelUsername != "" && cfg.WebPanelPassword != "" {
 		serverCount++
@@ -2343,6 +2459,11 @@ func main() {
 	go runDOHServer(ctx, &wg)
 	go startDoTServer(ctx, &wg)
 	go serveSniProxy(ctx, &wg)
+
+	// Start DNS server if enabled
+	if cfg.DNSEnabled {
+		go startDNSServer(ctx, &wg)
+	}
 
 	// Start web panel if enabled
 	if cfg.WebPanelEnabled && cfg.WebPanelUsername != "" && cfg.WebPanelPassword != "" {
@@ -2355,6 +2476,7 @@ func main() {
 	}
 
 	logger.Info("all servers started",
+		"dns_enabled", cfg.DNSEnabled,
 		"sni_port", sniPort,
 		"dot_port", 853,
 		"doh_address", "127.0.0.1:8080",
