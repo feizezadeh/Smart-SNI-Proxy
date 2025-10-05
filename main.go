@@ -85,6 +85,7 @@ var (
 type Config struct {
 	Host              string            `json:"host"`
 	Domains           map[string]string `json:"domains"` // pattern -> IP (supports exact or "*.example.com")
+	SNIPort           int               `json:"sni_port,omitempty"`           // SNI proxy port (default 443)
 	UpstreamDOH       []string          `json:"upstream_doh,omitempty"`
 	AuthTokens        []string          `json:"auth_tokens,omitempty"`
 	EnableAuth        bool              `json:"enable_auth,omitempty"`
@@ -1212,13 +1213,19 @@ func handleConnection(clientConn net.Conn) {
 func serveSniProxy(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	ln, err := net.Listen("tcp", ":443")
+	cfg := getConfig()
+	sniPort := cfg.SNIPort
+	if sniPort == 0 {
+		sniPort = 443
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", sniPort))
 	if err != nil {
 		logger.Error("SNI: failed to listen", "error", err)
 		logger.Warn("SNI proxy disabled due to port conflict")
 		return
 	}
-	logger.Info("SNI proxy started", "port", 443)
+	logger.Info("SNI proxy started", "port", sniPort)
 
 	go func() {
 		<-ctx.Done()
@@ -2342,8 +2349,13 @@ func main() {
 		go runWebPanelServer(ctx, &wg)
 	}
 
+	sniPort := cfg.SNIPort
+	if sniPort == 0 {
+		sniPort = 443
+	}
+
 	logger.Info("all servers started",
-		"sni_port", 443,
+		"sni_port", sniPort,
 		"dot_port", 853,
 		"doh_address", "127.0.0.1:8080",
 		"web_panel_enabled", cfg.WebPanelEnabled,
