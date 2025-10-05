@@ -1579,6 +1579,18 @@ func serveWebPanel(ctx *fasthttp.RequestCtx) {
 	_, _ = ctx.Write(htmlContent)
 }
 
+func serveStaticFile(ctx *fasthttp.RequestCtx, filename string, contentType string) {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		ctx.Error("File not found", fasthttp.StatusNotFound)
+		return
+	}
+
+	ctx.SetContentType(contentType)
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(content)
+}
+
 func handlePanelLogin(ctx *fasthttp.RequestCtx) {
 	var req struct {
 		Username string `json:"username"`
@@ -2396,6 +2408,8 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 			switch path {
 			case "/panel", "/panel/":
 				serveWebPanel(c)
+			case "/webpanel-enhancements.js":
+				serveStaticFile(c, "webpanel-enhancements.js", "application/javascript")
 			case "/panel/api/login":
 				handlePanelLogin(c)
 			case "/panel/api/logout":
