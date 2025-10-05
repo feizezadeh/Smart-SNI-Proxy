@@ -87,15 +87,28 @@
 
     // ========== Add Settings Panel ==========
     function addSettingsPanel() {
+        // Check if already added
+        if (document.querySelector('.settings-panel-container')) {
+            console.log('Settings panel already exists');
+            return;
+        }
+
         // Find the location to insert settings (before System Info Panel or at end)
         const contentGrid = document.querySelector('.dashboard-container .content-grid');
         if (!contentGrid) {
-            console.warn('Content grid not found, trying to add settings panel later');
+            console.warn('Content grid not found, trying alternative method');
+            // Try finding any container with panels
+            const dashboardContainer = document.querySelector('.dashboard-container');
+            if (!dashboardContainer) {
+                console.error('Dashboard container not found');
+                return;
+            }
+            addSettingsPanelAlternative(dashboardContainer);
             return;
         }
 
         const settingsHTML = `
-            <div class="panel" style="grid-column: 1 / -1; margin-top: 20px;">
+            <div class="panel settings-panel-container" style="grid-column: 1 / -1; margin-top: 20px;">
                 <h2>⚙️ Settings</h2>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
                     <!-- Change Password -->
@@ -144,6 +157,53 @@
         } else {
             contentGrid.insertAdjacentHTML('beforeend', settingsHTML);
         }
+        console.log('✅ Settings panel added to content grid');
+    }
+
+    // Alternative method to add settings panel
+    function addSettingsPanelAlternative(container) {
+        const settingsHTML = `
+            <div class="panel settings-panel-container" style="margin: 20px; background: white; border-radius: 15px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                <h2 style="margin-bottom: 20px;">⚙️ Settings</h2>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <!-- Change Password -->
+                    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                        <h3 style="margin-bottom: 15px; color: #333;">🔒 Change Password</h3>
+                        <div class="form-group" style="margin-bottom: 15px;">
+                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Current Password:</label>
+                            <input type="password" id="currentPassword" placeholder="Enter current password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 15px;">
+                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">New Password:</label>
+                            <input type="password" id="newPassword" placeholder="Enter new password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 15px;">
+                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Confirm New Password:</label>
+                            <input type="password" id="confirmPassword" placeholder="Confirm new password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        </div>
+                        <button onclick="changePassword()" style="width: 100%; padding: 14px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 16px; font-weight: 600; cursor: pointer;">Change Password</button>
+                    </div>
+
+                    <!-- Change Username -->
+                    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                        <h3 style="margin-bottom: 15px; color: #333;">👤 Change Username</h3>
+                        <div class="form-group" style="margin-bottom: 15px;">
+                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Current Password:</label>
+                            <input type="password" id="usernamePassword" placeholder="Enter password to confirm" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 15px;">
+                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">New Username:</label>
+                            <input type="text" id="newUsername" placeholder="Enter new username" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        </div>
+                        <button onclick="changeUsername()" style="width: 100%; padding: 14px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 62px;">Change Username</button>
+                        <p style="margin-top: 10px; font-size: 12px; color: #666;">⚠️ You will be logged out after changing username</p>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        container.insertAdjacentHTML('beforeend', settingsHTML);
+        console.log('✅ Settings panel added via alternative method');
     }
 
     // ========== Change Password Function ==========
@@ -250,22 +310,41 @@
 
     // ========== Initialize on page load ==========
     function initialize() {
-        // Wait for dashboard to be loaded
+        console.log('Initializing web panel enhancements...');
+
+        // Try multiple times with increasing delays
+        let attempts = 0;
+        const maxAttempts = 20;
+
         const checkDashboard = setInterval(() => {
+            attempts++;
             const dashboard = document.querySelector('.dashboard-container');
-            if (dashboard && dashboard.style.display !== 'none') {
+
+            console.log(`Attempt ${attempts}: Dashboard found = ${!!dashboard}, Display = ${dashboard?.style.display}`);
+
+            if (dashboard && (dashboard.style.display !== 'none' || !dashboard.style.display)) {
                 clearInterval(checkDashboard);
+                console.log('Dashboard detected, adding settings panel...');
 
-                // Add settings panel after a short delay to ensure DOM is ready
+                // Try immediately and then with delays
+                addSettingsPanel();
+                setTimeout(() => addSettingsPanel(), 500);
+                setTimeout(() => addSettingsPanel(), 1000);
+                setTimeout(() => addSettingsPanel(), 2000);
+
+                console.log('✅ Web panel enhancements loaded');
+            } else if (attempts >= maxAttempts) {
+                clearInterval(checkDashboard);
+                console.warn('Dashboard not found after maximum attempts, trying alternative method');
+                // Try adding to body as fallback
                 setTimeout(() => {
-                    addSettingsPanel();
-                    console.log('✅ Web panel enhancements loaded');
-                }, 500);
+                    const body = document.body;
+                    if (body && !document.querySelector('.settings-panel-container')) {
+                        addSettingsPanelAlternative(body);
+                    }
+                }, 1000);
             }
-        }, 100);
-
-        // Clear interval after 10 seconds if dashboard not found
-        setTimeout(() => clearInterval(checkDashboard), 10000);
+        }, 200);
     }
 
     // Start initialization when DOM is ready
