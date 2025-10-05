@@ -848,8 +848,10 @@
                 return;
             }
 
-            let html = '<table style="width: 100%; border-collapse: collapse;">';
-            html += '<tr style="background: #f5f5f5; text-align: left;"><th style="padding: 10px;">IP</th><th>Name</th><th>Expires</th><th>Status</th><th>Usage</th><th>Actions</th></tr>';
+            let html = '<table style="width: 100%; border-collapse: collapse; font-size: 14px;">';
+            html += '<tr style="background: #f5f5f5; text-align: left;">';
+            html += '<th style="padding: 10px;">Name</th><th>IPs</th><th>Max IPs</th><th>Expires</th><th>Status</th><th>Usage</th><th>Actions</th>';
+            html += '</tr>';
 
             users.forEach(user => {
                 const isExpired = new Date(user.expires_at) < new Date();
@@ -857,9 +859,15 @@
                 const statusText = user.is_active && !isExpired ? 'Active' : 'Inactive';
                 const expiryDate = new Date(user.expires_at).toLocaleDateString();
 
+                // Format IPs list
+                const ips = user.ips || [];
+                const ipsText = ips.length > 0 ? ips.join('<br>') : '<em style="color: #999;">No IPs yet</em>';
+                const ipCount = `${ips.length} / ${user.max_ips}`;
+
                 html += `<tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 10px;">${user.ip}</td>
-                    <td>${user.name}</td>
+                    <td style="padding: 10px;"><strong>${user.name}</strong></td>
+                    <td style="font-family: monospace; font-size: 12px;">${ipsText}</td>
+                    <td style="text-align: center;">${ipCount}</td>
                     <td>${expiryDate}</td>
                     <td><span style="color: ${statusColor};">● ${statusText}</span></td>
                     <td>${user.usage_count || 0}</td>
