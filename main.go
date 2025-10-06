@@ -626,6 +626,31 @@ func addIPToUser(userID, clientIP string) error {
 
 
 // Background task to check and deactivate expired users
+// Migrate old users to add API keys if missing
+func migrateUsersAPIKeys() {
+	migratedCount := 0
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		if user.APIKey == "" {
+			// Generate API key for old user
+			apiKey, err := generateAPIKey()
+			if err != nil {
+				logger.Error("failed to generate API key for user", "user", user.Name, "error", err)
+				return true
+			}
+			user.APIKey = apiKey
+			users.Store(user.ID, user)
+			migratedCount++
+			logger.Info("migrated user with API key", "user", user.Name, "api_key", apiKey[:16]+"...")
+		}
+		return true
+	})
+
+	if migratedCount > 0 {
+		logger.Info("user migration completed", "migrated", migratedCount)
+	}
+}
+
 func startExpirationChecker(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
@@ -2772,6 +2797,9 @@ func main() {
 	if cfg.UserManagement {
 		go startExpirationChecker(ctx)
 		logger.Info("user expiration checker started")
+
+		// Migrate old users without API keys
+		migrateUsersAPIKeys()
 	}
 	defer stop()
 
