@@ -398,6 +398,7 @@ function displayUsers(users) {
             <td><span style="color: ${statusColor};">● ${statusText}</span></td>
             <td>${user.usage_count || 0}</td>
             <td>
+                <button onclick="showUserDetails('${user.id}', '${user.name}', '${user.api_key || ''}')" style="padding: 5px 10px; margin: 2px; background: #9b59b6; color: white; border: none; border-radius: 4px; cursor: pointer;" title="View API Key & Scripts">Details</button>
                 <button onclick="extendUser('${user.id}')" style="padding: 5px 10px; margin: 2px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer;">Extend</button>
                 <button onclick="deleteUser('${user.id}')" style="padding: 5px 10px; margin: 2px; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer;">Delete</button>
             </td>
@@ -557,5 +558,174 @@ function closeUserResultDialog() {
     const modal = bootstrap.Modal.getInstance(document.getElementById('userResultModal'));
     if (modal) {
         modal.hide();
+    }
+}
+
+// Show user details with API key and update scripts
+function showUserDetails(userId, userName, apiKey) {
+    const hostname = window.location.hostname;
+    const updateURL = `https://${hostname}/api/update-ip?key=${apiKey}`;
+
+    // Bash script for auto IP update
+    const bashScript = `#!/bin/bash
+# Auto IP Update Script for ${userName}
+# Run this script every 10 minutes via cron
+
+API_KEY="${apiKey}"
+UPDATE_URL="https://${hostname}/api/update-ip"
+
+# Send update request
+curl -s -X GET "\${UPDATE_URL}?key=\${API_KEY}" | jq .
+
+# To run automatically, add to crontab:
+# */10 * * * * /path/to/this/script.sh >> /var/log/dns-ip-update.log 2>&1`;
+
+    // Python script
+    const pythonScript = `#!/usr/bin/env python3
+# Auto IP Update Script for ${userName}
+
+import requests
+import time
+
+API_KEY = "${apiKey}"
+UPDATE_URL = "https://${hostname}/api/update-ip"
+
+def update_ip():
+    try:
+        response = requests.get(f"{UPDATE_URL}?key={API_KEY}")
+        print(response.json())
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    update_ip()
+
+# Run every 10 minutes:
+# while True:
+#     update_ip()
+#     time.sleep(600)`;
+
+    // DoH usage example with API key
+    const dohExample = `# DoH with API key (for dynamic IP)
+curl -X POST "https://${hostname}/dns-query" \\
+  -H "Content-Type: application/dns-message" \\
+  -H "X-API-Key: ${apiKey}" \\
+  --data-binary @dns-query.bin`;
+
+    const modalHTML = `
+<div class="modal fade" id="userDetailsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                <h5 class="modal-title"><i class="bi bi-key"></i> User Details: ${userName}</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-4">
+                    <h6 class="text-primary"><i class="bi bi-shield-lock"></i> API Key</h6>
+                    <div class="input-group mb-2">
+                        <input type="text" class="form-control font-monospace" value="${apiKey}" id="apiKeyInput" readonly>
+                        <button class="btn btn-outline-primary" onclick="copyToClipboard('apiKeyInput')">
+                            <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                    </div>
+                    <small class="text-muted">Use this API key for authentication when your IP changes</small>
+                </div>
+
+                <div class="mb-4">
+                    <h6 class="text-primary"><i class="bi bi-link-45deg"></i> Update IP Endpoint</h6>
+                    <div class="input-group mb-2">
+                        <input type="text" class="form-control font-monospace small" value="${updateURL}" id="updateURLInput" readonly>
+                        <button class="btn btn-outline-primary" onclick="copyToClipboard('updateURLInput')">
+                            <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                    </div>
+                    <button class="btn btn-sm btn-success" onclick="testUpdateIP('${apiKey}')">
+                        <i class="bi bi-arrow-repeat"></i> Test Update Now
+                    </button>
+                </div>
+
+                <div class="mb-4">
+                    <h6 class="text-primary"><i class="bi bi-terminal"></i> Bash Auto-Update Script</h6>
+                    <textarea class="form-control font-monospace small" rows="8" id="bashScript" readonly>${bashScript}</textarea>
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="copyToClipboard('bashScript')">
+                        <i class="bi bi-clipboard"></i> Copy Bash Script
+                    </button>
+                </div>
+
+                <div class="mb-4">
+                    <h6 class="text-primary"><i class="bi bi-code-square"></i> Python Auto-Update Script</h6>
+                    <textarea class="form-control font-monospace small" rows="10" id="pythonScript" readonly>${pythonScript}</textarea>
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="copyToClipboard('pythonScript')">
+                        <i class="bi bi-clipboard"></i> Copy Python Script
+                    </button>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary"><i class="bi bi-cloud-arrow-up"></i> DoH Usage with API Key</h6>
+                    <textarea class="form-control font-monospace small" rows="4" id="dohExample" readonly>${dohExample}</textarea>
+                    <button class="btn btn-sm btn-outline-primary mt-2" onclick="copyToClipboard('dohExample')">
+                        <i class="bi bi-clipboard"></i> Copy Example
+                    </button>
+                </div>
+
+                <div class="alert alert-info small">
+                    <strong><i class="bi bi-info-circle"></i> Note:</strong>
+                    For dynamic IPs, run the update script every 10 minutes via cron or Task Scheduler.
+                    This will automatically register your new IP when it changes.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>`;
+
+    // Remove old modal if exists
+    const oldModal = document.getElementById('userDetailsModal');
+    if (oldModal) oldModal.remove();
+
+    // Add new modal
+    document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+    // Show modal
+    const modal = new bootstrap.Modal(document.getElementById('userDetailsModal'));
+    modal.show();
+}
+
+function copyToClipboard(elementId) {
+    const element = document.getElementById(elementId);
+    element.select();
+    navigator.clipboard.writeText(element.value);
+
+    // Visual feedback
+    const btn = event.target.closest('button');
+    const originalHTML = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-check"></i> Copied!';
+    btn.classList.add('btn-success');
+    btn.classList.remove('btn-outline-primary');
+
+    setTimeout(() => {
+        btn.innerHTML = originalHTML;
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-outline-primary');
+    }, 2000);
+}
+
+async function testUpdateIP(apiKey) {
+    const hostname = window.location.hostname;
+    try {
+        const response = await fetch(`https://${hostname}/api/update-ip?key=${apiKey}`);
+        const data = await response.json();
+
+        if (data.success) {
+            alert(`✅ IP Updated Successfully!\n\nIP: ${data.ip}\nUser: ${data.user}\nTotal IPs: ${data.all_ips.join(', ')}`);
+            await loadUsers(); // Refresh user list
+        } else {
+            alert(`❌ Update failed: ${data.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        alert(`❌ Error: ${error.message}`);
     }
 }

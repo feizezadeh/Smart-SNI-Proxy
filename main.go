@@ -108,6 +108,7 @@ type Config struct {
 type User struct {
 	ID          string    `json:"id"`           // Unique user ID (also used as token)
 	Name        string    `json:"name"`         // User's name/identifier
+	APIKey      string    `json:"api_key"`      // Unique API key for authentication (alternative to IP)
 	IPs         []string  `json:"ips"`          // List of registered IPs (FIFO)
 	MaxIPs      int       `json:"max_ips"`      // Maximum number of IPs allowed
 	CreatedAt   time.Time `json:"created_at"`   // Registration time
@@ -366,6 +367,15 @@ func generateUserID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// Generate unique API key for user (32 bytes = 64 hex chars)
+func generateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // Check if user is authorized based on IP
 func isUserAuthorized(ip string) bool {
 	cfg := getConfig()
@@ -398,6 +408,64 @@ func isUserAuthorized(ip string) bool {
 	users.Store(userID, user)
 
 	return true
+}
+
+// Check if user is authorized by API key (for dynamic IPs)
+func isUserAuthorizedByAPIKey(apiKey string) bool {
+	cfg := getConfig()
+	if !cfg.UserManagement {
+		return true // User management disabled, allow all
+	}
+
+	if apiKey == "" {
+		return false
+	}
+
+	// Search for user with matching API key
+	var foundUser *User
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		if user.APIKey == apiKey {
+			foundUser = user
+			return false // Stop iteration
+		}
+		return true
+	})
+
+	if foundUser == nil {
+		return false // API key not found
+	}
+
+	// Check if user is active and not expired
+	if !foundUser.IsActive || time.Now().After(foundUser.ExpiresAt) {
+		return false
+	}
+
+	// Update usage stats
+	foundUser.UsageCount++
+	foundUser.LastUsed = time.Now()
+	users.Store(foundUser.ID, foundUser)
+
+	return true
+}
+
+// Get user by API key
+func getUserByAPIKey(apiKey string) *User {
+	if apiKey == "" {
+		return nil
+	}
+
+	var foundUser *User
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		if user.APIKey == apiKey {
+			foundUser = user
+			return false // Stop iteration
+		}
+		return true
+	})
+
+	return foundUser
 }
 
 // Get user by IP (fast lookup)
@@ -448,10 +516,16 @@ func createUser(name, description string, maxIPs, validDays int) (*User, error) 
 		return nil, err
 	}
 
+	apiKey, err := generateAPIKey()
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	user := &User{
 		ID:          id,
 		Name:        name,
+		APIKey:      apiKey,
 		IPs:         []string{},
 		MaxIPs:      maxIPs,
 		Description: description,
@@ -463,7 +537,7 @@ func createUser(name, description string, maxIPs, validDays int) (*User, error) 
 	}
 
 	users.Store(id, user)
-	logger.Info("user created", "id", id, "name", name, "max_ips", maxIPs, "expires", user.ExpiresAt)
+	logger.Info("user created", "id", id, "name", name, "api_key", apiKey[:16]+"...", "max_ips", maxIPs, "expires", user.ExpiresAt)
 	return user, nil
 }
 
@@ -1426,11 +1500,22 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 
 	logger.Debug("DoH request", "client", clientIP, "method", string(ctx.Method()))
 
-	// Check user-based authorization
-	if !isUserAuthorized(clientIP) {
-		logger.Warn("DoH user not authorized", "client", clientIP)
+	// Check user-based authorization (IP or API key)
+	apiKey := string(ctx.Request.Header.Peek("X-API-Key"))
+	authorized := isUserAuthorized(clientIP)
+
+	// If IP auth failed, try API key auth
+	if !authorized && apiKey != "" {
+		authorized = isUserAuthorizedByAPIKey(apiKey)
+		if authorized {
+			logger.Debug("DoH authorized via API key", "client", clientIP, "api_key", apiKey[:16]+"...")
+		}
+	}
+
+	if !authorized {
+		logger.Warn("DoH user not authorized", "client", clientIP, "has_api_key", apiKey != "")
 		metrics.IncErrors()
-		ctx.Error("Access denied - Please register first", fasthttp.StatusForbidden)
+		ctx.Error("Access denied - Please register first or provide valid X-API-Key header", fasthttp.StatusForbidden)
 		return
 	}
 
@@ -2422,6 +2507,65 @@ func handleRegisterSubmit(ctx *fasthttp.RequestCtx) {
 	})
 }
 
+// Handle auto IP update via API key
+func handleUpdateIP(ctx *fasthttp.RequestCtx) {
+	// Get API key from query parameter or header
+	apiKey := string(ctx.QueryArgs().Peek("key"))
+	if apiKey == "" {
+		apiKey = string(ctx.Request.Header.Peek("X-API-Key"))
+	}
+
+	if apiKey == "" {
+		ctx.Error(`{"error":"Missing API key. Use ?key=YOUR_API_KEY or X-API-Key header"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Find user by API key
+	user := getUserByAPIKey(apiKey)
+	if user == nil {
+		ctx.Error(`{"error":"Invalid API key"}`, fasthttp.StatusForbidden)
+		return
+	}
+
+	// Check if user is active
+	if !user.IsActive {
+		ctx.Error(`{"error":"User is inactive"}`, fasthttp.StatusForbidden)
+		return
+	}
+
+	// Check if user is expired
+	if time.Now().After(user.ExpiresAt) {
+		ctx.Error(`{"error":"User has expired"}`, fasthttp.StatusForbidden)
+		return
+	}
+
+	// Get client IP
+	clientIP := getClientIP(ctx)
+
+	// Add IP to user (with FIFO logic)
+	err := addIPToUser(user.ID, clientIP)
+	if err != nil {
+		ctx.Error(fmt.Sprintf(`{"error":"%s"}`, err.Error()), fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Refresh user data
+	user = getUserByID(user.ID)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success":    true,
+		"message":    "IP updated successfully",
+		"ip":         clientIP,
+		"user":       user.Name,
+		"all_ips":    user.IPs,
+		"expires_at": user.ExpiresAt,
+	})
+
+	logger.Info("IP auto-updated", "user", user.Name, "ip", clientIP, "total_ips", len(user.IPs))
+}
+
 func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -2495,6 +2639,8 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 				serveRegisterPage(c)
 			case "/register/submit":
 				handleRegisterSubmit(c)
+			case "/api/update-ip":
+				handleUpdateIP(c)
 			default:
 				c.Error("Not found", fasthttp.StatusNotFound)
 			}
