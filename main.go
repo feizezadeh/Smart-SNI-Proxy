@@ -1326,50 +1326,111 @@ func handleDNSTCP(conn net.Conn) {
 
 // ======================== TLS SNI Peek ========================
 
-type readOnlyConn struct{ r io.Reader }
+// Manual SNI parser - doesn't require SSL certificate
+func parseSNIFromClientHello(data []byte) (string, error) {
+	if len(data) < 43 {
+		return "", errors.New("ClientHello too short")
+	}
 
-func (c readOnlyConn) Read(p []byte) (int, error)       { return c.r.Read(p) }
-func (c readOnlyConn) Write(_ []byte) (int, error)      { return 0, io.ErrClosedPipe }
-func (c readOnlyConn) Close() error                     { return nil }
-func (c readOnlyConn) LocalAddr() net.Addr              { return nil }
-func (c readOnlyConn) RemoteAddr() net.Addr             { return nil }
-func (c readOnlyConn) SetDeadline(time.Time) error      { return nil }
-func (c readOnlyConn) SetReadDeadline(time.Time) error  { return nil }
-func (c readOnlyConn) SetWriteDeadline(time.Time) error { return nil }
+	// Check if it's a TLS handshake (0x16)
+	if data[0] != 0x16 {
+		return "", errors.New("not a TLS handshake")
+	}
 
-// Perform a TLS handshake only to capture ClientHello (SNI), then abort
-func readClientHello(reader io.Reader) (*tls.ClientHelloInfo, error) {
-	helloCh := make(chan *tls.ClientHelloInfo, 1)
+	// Skip: record header (5 bytes) + handshake type (1) + length (3) + version (2) + random (32)
+	pos := 43
 
-	cfg := &tls.Config{
-		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
-			select {
-			case helloCh <- chi:
-			default:
+	// Session ID length
+	if pos >= len(data) {
+		return "", errors.New("invalid ClientHello")
+	}
+	sessionIDLen := int(data[pos])
+	pos += 1 + sessionIDLen
+
+	// Cipher suites length
+	if pos+2 > len(data) {
+		return "", errors.New("invalid ClientHello")
+	}
+	cipherSuitesLen := int(data[pos])<<8 | int(data[pos+1])
+	pos += 2 + cipherSuitesLen
+
+	// Compression methods length
+	if pos+1 > len(data) {
+		return "", errors.New("invalid ClientHello")
+	}
+	compressionMethodsLen := int(data[pos])
+	pos += 1 + compressionMethodsLen
+
+	// Extensions length
+	if pos+2 > len(data) {
+		return "", nil // No extensions
+	}
+	extensionsLen := int(data[pos])<<8 | int(data[pos+1])
+	pos += 2
+
+	extensionsEnd := pos + extensionsLen
+	if extensionsEnd > len(data) {
+		return "", errors.New("invalid extensions")
+	}
+
+	// Parse extensions
+	for pos+4 <= extensionsEnd {
+		extType := int(data[pos])<<8 | int(data[pos+1])
+		extLen := int(data[pos+2])<<8 | int(data[pos+3])
+		pos += 4
+
+		if pos+extLen > extensionsEnd {
+			break
+		}
+
+		// SNI extension type = 0
+		if extType == 0 && extLen >= 5 {
+			// SNI list length (2 bytes)
+			pos += 2
+			// SNI type (1 byte) - should be 0 for hostname
+			if data[pos] == 0 {
+				pos++
+				// Hostname length (2 bytes)
+				hostnameLen := int(data[pos])<<8 | int(data[pos+1])
+				pos += 2
+				if pos+hostnameLen <= len(data) {
+					return string(data[pos : pos+hostnameLen]), nil
+				}
 			}
-			// Returning nil causes handshake to fail fast; we only need the Hello
-			return nil, nil
-		},
+			return "", nil
+		}
+		pos += extLen
 	}
 
-	t := tls.Server(readOnlyConn{r: reader}, cfg)
-	_ = t.Handshake() // expected to error; we just want ClientHello
-
-	select {
-	case h := <-helloCh:
-		return h, nil
-	default:
-		return nil, errors.New("failed to capture ClientHello")
-	}
+	return "", nil
 }
 
-func peekClientHello(reader io.Reader) (*tls.ClientHelloInfo, io.Reader, error) {
-	peekBuf := new(bytes.Buffer)
-	hello, err := readClientHello(io.TeeReader(reader, peekBuf))
-	if err != nil {
-		return nil, nil, err
+func peekClientHello(conn net.Conn) (string, []byte, error) {
+	// Read first 5 bytes to get TLS record length
+	header := make([]byte, 5)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return "", nil, err
 	}
-	return hello, peekBuf, nil
+
+	// TLS record length is in bytes 3-4
+	recordLen := int(header[3])<<8 | int(header[4])
+
+	// Read the rest of the ClientHello
+	payload := make([]byte, recordLen)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return "", nil, err
+	}
+
+	// Combine header + payload
+	fullRecord := append(header, payload...)
+
+	// Parse SNI
+	sni, err := parseSNIFromClientHello(fullRecord)
+	if err != nil {
+		return "", fullRecord, err
+	}
+
+	return sni, fullRecord, nil
 }
 
 // ======================== TCP Proxy (SNI) ========================
@@ -1403,7 +1464,7 @@ func handleConnection(clientConn net.Conn) {
 
 	// Deadline only for initial ClientHello capture
 	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	clientHello, clientHelloBytes, err := peekClientHello(clientConn)
+	sni, clientHelloBytes, err := peekClientHello(clientConn)
 	if err != nil {
 		logger.Debug("SNI peek failed", "error", err, "client", clientAddr)
 		metrics.IncErrors()
@@ -1411,7 +1472,7 @@ func handleConnection(clientConn net.Conn) {
 	}
 	_ = clientConn.SetReadDeadline(time.Time{}) // clear deadline
 
-	sni := strings.TrimSpace(strings.ToLower(clientHello.ServerName))
+	sni = strings.TrimSpace(strings.ToLower(sni))
 	if sni == "" {
 		logger.Warn("SNI missing from ClientHello", "client", clientAddr)
 		metrics.IncErrors()
@@ -1448,7 +1509,7 @@ func handleConnection(clientConn net.Conn) {
 	defer backendConn.Close()
 
 	// Replay the captured ClientHello to the backend first
-	if _, err := io.Copy(backendConn, clientHelloBytes); err != nil {
+	if _, err := backendConn.Write(clientHelloBytes); err != nil {
 		logger.Debug("failed to write ClientHello", "error", err, "client", clientAddr)
 		metrics.IncErrors()
 		return
