@@ -2408,8 +2408,12 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 			switch path {
 			case "/panel", "/panel/":
 				serveWebPanel(c)
+			case "/webpanel-main.js":
+				serveStaticFile(c, "webpanel-main.js", "application/javascript")
 			case "/webpanel-enhancements.js":
 				serveStaticFile(c, "webpanel-enhancements.js", "application/javascript")
+			case "/webpanel-style.css":
+				serveStaticFile(c, "webpanel-style.css", "text/css")
 			case "/panel/api/login":
 				handlePanelLogin(c)
 			case "/panel/api/logout":

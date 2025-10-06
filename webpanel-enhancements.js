@@ -163,40 +163,40 @@
     // Alternative method to add settings panel
     function addSettingsPanelAlternative(container) {
         const settingsHTML = `
-            <div class="panel settings-panel-container" style="margin: 20px; background: white; border-radius: 15px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                <h2 style="margin-bottom: 20px;">⚙️ Settings</h2>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div class="panel settings-panel-container">
+                <h2>⚙️ Settings</h2>
+                <div class="settings-grid">
                     <!-- Change Password -->
-                    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px;">
-                        <h3 style="margin-bottom: 15px; color: #333;">🔒 Change Password</h3>
-                        <div class="form-group" style="margin-bottom: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Current Password:</label>
-                            <input type="password" id="currentPassword" placeholder="Enter current password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                    <div class="settings-section">
+                        <h3>🔒 Change Password</h3>
+                        <div class="form-group">
+                            <label for="currentPassword">Current Password</label>
+                            <input type="password" id="currentPassword" class="form-control" placeholder="Enter current password">
                         </div>
-                        <div class="form-group" style="margin-bottom: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">New Password:</label>
-                            <input type="password" id="newPassword" placeholder="Enter new password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        <div class="form-group">
+                            <label for="newPassword">New Password</label>
+                            <input type="password" id="newPassword" class="form-control" placeholder="Enter new password">
                         </div>
-                        <div class="form-group" style="margin-bottom: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Confirm New Password:</label>
-                            <input type="password" id="confirmPassword" placeholder="Confirm new password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        <div class="form-group">
+                            <label for="confirmPassword">Confirm New Password</label>
+                            <input type="password" id="confirmPassword" class="form-control" placeholder="Confirm new password">
                         </div>
-                        <button onclick="changePassword()" style="width: 100%; padding: 14px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 16px; font-weight: 600; cursor: pointer;">Change Password</button>
+                        <button onclick="changePassword()" class="btn btn-primary btn-block">Change Password</button>
                     </div>
 
                     <!-- Change Username -->
-                    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px;">
-                        <h3 style="margin-bottom: 15px; color: #333;">👤 Change Username</h3>
-                        <div class="form-group" style="margin-bottom: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">Current Password:</label>
-                            <input type="password" id="usernamePassword" placeholder="Enter password to confirm" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                    <div class="settings-section">
+                        <h3>👤 Change Username</h3>
+                        <div class="form-group">
+                            <label for="usernamePassword">Current Password</label>
+                            <input type="password" id="usernamePassword" class="form-control" placeholder="Enter password to confirm">
                         </div>
-                        <div class="form-group" style="margin-bottom: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: 500;">New Username:</label>
-                            <input type="text" id="newUsername" placeholder="Enter new username" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
+                        <div class="form-group">
+                            <label for="newUsername">New Username</label>
+                            <input type="text" id="newUsername" class="form-control" placeholder="Enter new username">
                         </div>
-                        <button onclick="changeUsername()" style="width: 100%; padding: 14px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 62px;">Change Username</button>
-                        <p style="margin-top: 10px; font-size: 12px; color: #666;">⚠️ You will be logged out after changing username</p>
+                        <button onclick="changeUsername()" class="btn btn-primary btn-block">Change Username</button>
+                        <p class="warning-text">⚠️ You will be logged out after changing username</p>
                     </div>
                 </div>
             </div>
