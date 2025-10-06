@@ -419,6 +419,28 @@ func getUserByID(id string) *User {
 	return nil
 }
 
+// Check if IP is authorized to use DNS services
+func isIPAuthorized(ip string) bool {
+	user := getUserByIP(ip)
+	if user == nil {
+		return false
+	}
+
+	// Check if user is active
+	if !user.IsActive {
+		logger.Debug("IP denied: user inactive", "ip", ip, "user", user.Name)
+		return false
+	}
+
+	// Check if user is expired
+	if time.Now().After(user.ExpiresAt) {
+		logger.Debug("IP denied: user expired", "ip", ip, "user", user.Name, "expired_at", user.ExpiresAt)
+		return false
+	}
+
+	return true
+}
+
 // Create new user
 func createUser(name, description string, maxIPs, validDays int) (*User, error) {
 	id, err := generateUserID()
@@ -1149,6 +1171,15 @@ func startDNSServer(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 func handleDNSUDP(conn *net.UDPConn, addr *net.UDPAddr, query []byte) {
+	clientIP, _, _ := net.SplitHostPort(addr.String())
+
+	// Check user-based authorization
+	if !isUserAuthorized(clientIP) {
+		logger.Warn("DNS UDP user not authorized", "client", clientIP)
+		metrics.IncErrors()
+		return
+	}
+
 	response, err := processDNSQuery(query)
 	if err != nil {
 		logger.Debug("DNS UDP query failed", "error", err, "client", addr.String())
@@ -1159,6 +1190,15 @@ func handleDNSUDP(conn *net.UDPConn, addr *net.UDPAddr, query []byte) {
 
 func handleDNSTCP(conn net.Conn) {
 	defer conn.Close()
+
+	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+
+	// Check user-based authorization
+	if !isUserAuthorized(clientIP) {
+		logger.Warn("DNS TCP user not authorized", "client", clientIP)
+		metrics.IncErrors()
+		return
+	}
 
 	// Read DNS message length (2 bytes)
 	lenBuf := make([]byte, 2)
