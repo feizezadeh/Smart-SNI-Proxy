@@ -566,6 +566,11 @@ function showUserDetails(userId, userName, apiKey) {
     const hostname = window.location.hostname;
     const updateURL = `https://${hostname}/api/update-ip?key=${apiKey}`;
 
+    // DoH URLs with embedded API key (for browsers and apps that don't support custom headers)
+    const dohURLWithKey = `https://${hostname}/dns-query?key=${apiKey}`;
+    const dohURLAlt1 = `https://${hostname}/dns-query?api=${apiKey}`;
+    const dohURLAlt2 = `https://${hostname}/dns-query?apikey=${apiKey}`;
+
     // Bash script for auto IP update
     const bashScript = `#!/bin/bash
 # Auto IP Update Script for ${userName}
@@ -633,7 +638,40 @@ curl -X POST "https://${hostname}/dns-query" \\
                 </div>
 
                 <div class="mb-4">
-                    <h6 class="text-primary"><i class="bi bi-link-45deg"></i> Update IP Endpoint</h6>
+                    <h6 class="text-primary"><i class="bi bi-globe"></i> DoH URLs with API Key (Ready to use in browsers!)</h6>
+                    <small class="text-muted d-block mb-2">Copy any of these URLs and paste in your browser/app DNS settings:</small>
+
+                    <label class="small text-muted">Option 1 (Recommended):</label>
+                    <div class="input-group mb-2">
+                        <input type="text" class="form-control font-monospace small" value="${dohURLWithKey}" id="dohURL1" readonly>
+                        <button class="btn btn-outline-primary btn-sm" onclick="copyToClipboard('dohURL1')">
+                            <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                    </div>
+
+                    <label class="small text-muted">Option 2:</label>
+                    <div class="input-group mb-2">
+                        <input type="text" class="form-control font-monospace small" value="${dohURLAlt1}" id="dohURL2" readonly>
+                        <button class="btn btn-outline-primary btn-sm" onclick="copyToClipboard('dohURL2')">
+                            <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                    </div>
+
+                    <label class="small text-muted">Option 3:</label>
+                    <div class="input-group mb-2">
+                        <input type="text" class="form-control font-monospace small" value="${dohURLAlt2}" id="dohURL3" readonly>
+                        <button class="btn btn-outline-primary btn-sm" onclick="copyToClipboard('dohURL3')">
+                            <i class="bi bi-clipboard"></i> Copy
+                        </button>
+                    </div>
+
+                    <div class="alert alert-success small mt-2 mb-0">
+                        <i class="bi bi-check-circle"></i> <strong>These URLs work even if your IP changes!</strong> Perfect for Firefox, Chrome, Android, iOS, etc.
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <h6 class="text-primary"><i class="bi bi-link-45deg"></i> Auto IP Update Endpoint</h6>
                     <div class="input-group mb-2">
                         <input type="text" class="form-control font-monospace small" value="${updateURL}" id="updateURLInput" readonly>
                         <button class="btn btn-outline-primary" onclick="copyToClipboard('updateURLInput')">

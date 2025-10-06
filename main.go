@@ -1501,7 +1501,18 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 	logger.Debug("DoH request", "client", clientIP, "method", string(ctx.Method()))
 
 	// Check user-based authorization (IP or API key)
+	// Try multiple sources for API key: header, query params (key, api, apikey)
 	apiKey := string(ctx.Request.Header.Peek("X-API-Key"))
+	if apiKey == "" {
+		apiKey = string(ctx.QueryArgs().Peek("key"))
+	}
+	if apiKey == "" {
+		apiKey = string(ctx.QueryArgs().Peek("api"))
+	}
+	if apiKey == "" {
+		apiKey = string(ctx.QueryArgs().Peek("apikey"))
+	}
+
 	authorized := isUserAuthorized(clientIP)
 
 	// If IP auth failed, try API key auth
@@ -1515,7 +1526,7 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 	if !authorized {
 		logger.Warn("DoH user not authorized", "client", clientIP, "has_api_key", apiKey != "")
 		metrics.IncErrors()
-		ctx.Error("Access denied - Please register first or provide valid X-API-Key header", fasthttp.StatusForbidden)
+		ctx.Error("Access denied - Please register first or provide valid API key (X-API-Key header or ?key= param)", fasthttp.StatusForbidden)
 		return
 	}
 
