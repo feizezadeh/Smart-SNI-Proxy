@@ -1526,7 +1526,7 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 	logger.Debug("DoH request", "client", clientIP, "method", string(ctx.Method()))
 
 	// Check user-based authorization (IP or API key)
-	// Try multiple sources for API key: header, query params (key, api, apikey)
+	// Try multiple sources for API key: header, query params (key, api, apikey), or path
 	apiKey := string(ctx.Request.Header.Peek("X-API-Key"))
 	if apiKey == "" {
 		apiKey = string(ctx.QueryArgs().Peek("key"))
@@ -1536,6 +1536,12 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 	}
 	if apiKey == "" {
 		apiKey = string(ctx.QueryArgs().Peek("apikey"))
+	}
+	// Check if API key is in path (e.g., /doh/API_KEY)
+	if apiKey == "" {
+		if val := ctx.UserValue("apikey"); val != nil {
+			apiKey = val.(string)
+		}
 	}
 
 	authorized := isUserAuthorized(clientIP)
@@ -2439,6 +2445,7 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
             const hostname = window.location.hostname;
             const apiKey = result.user.api_key;
             const dohWithKey = 'https://' + hostname + '/dns-query?key=' + apiKey;
+            const dohShortURL = 'https://' + hostname + '/doh/' + apiKey;
             const updateURL = 'https://' + hostname + '/api/update-ip?key=' + apiKey;
 
             return '<div style="margin-top: 20px;">' +
@@ -2451,9 +2458,17 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
 
                 '<div style="background: #fff3cd; padding: 20px; border-radius: 10px; margin-bottom: 20px;">' +
                     '<h3 style="color: #856404; margin-bottom: 15px;">🌐 DoH URLs (For Dynamic IPs)</h3>' +
-                    '<p style="font-size: 13px; color: #666; margin-bottom: 10px;">Copy and paste into your browser/app DNS settings:</p>' +
+                    '<p style="font-size: 13px; color: #666; margin-bottom: 15px;">Choose the URL format that works with your app:</p>' +
+
+                    '<label style="font-weight: 600; color: #856404; display: block; margin-bottom: 5px;">📱 For Intra / Short URL (Recommended):</label>' +
+                    '<div style="background: white; padding: 10px; border-radius: 5px; margin-bottom: 15px; word-break: break-all;">' +
+                        '<code style="font-size: 12px;">' + dohShortURL + '</code>' +
+                        '<button onclick="copyText(\'' + dohShortURL + '\')" style="width: auto; padding: 5px 10px; margin-left: 10px; font-size: 12px;">Copy</button>' +
+                    '</div>' +
+
+                    '<label style="font-weight: 600; color: #856404; display: block; margin-bottom: 5px;">🌐 For Browsers (Firefox, Chrome):</label>' +
                     '<div style="background: white; padding: 10px; border-radius: 5px; margin-bottom: 10px; word-break: break-all;">' +
-                        '<code style="font-size: 12px;">' + dohWithKey + '</code>' +
+                        '<code style="font-size: 11px;">' + dohWithKey + '</code>' +
                         '<button onclick="copyText(\'' + dohWithKey + '\')" style="width: auto; padding: 5px 10px; margin-left: 10px; font-size: 12px;">Copy</button>' +
                     '</div>' +
                 '</div>' +
@@ -2492,13 +2507,20 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
                     '</details>' +
 
                     '<details style="margin-bottom: 10px;">' +
-                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">🤖 Android</summary>' +
+                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">🤖 Android / Intra App</summary>' +
                         '<div style="padding: 15px; background: white; margin-top: 5px; border-radius: 5px;">' +
-                            '<p>Android doesn\'t support DoH URLs natively. Options:</p>' +
+                            '<p><strong>Option 1: Intra App (Recommended)</strong></p>' +
                             '<ol style="margin: 10px 0 10px 20px; line-height: 1.8;">' +
-                                '<li>Use Firefox/Chrome browser settings (above)</li>' +
-                                '<li>Install "Intra" app from Play Store</li>' +
+                                '<li>Install "Intra" from Google Play Store</li>' +
+                                '<li>Open Intra → Settings → Select DNS over HTTPS Server</li>' +
+                                '<li>Choose "Custom server URL"</li>' +
+                                '<li>Paste the short URL:<br><code style="background: #f0f0f0; padding: 5px; display: block; margin: 5px 0; word-break: break-all; font-size: 11px;">' + dohShortURL + '</code></li>' +
+                                '<li>Enable Intra protection</li>' +
                             '</ol>' +
+                            '<p><strong>Option 2: Browser-based</strong></p>' +
+                            '<ul style="margin: 10px 0 10px 20px;">' +
+                                '<li>Use Firefox or Chrome browser settings (see above)</li>' +
+                            '</ul>' +
                         '</div>' +
                     '</details>' +
 
@@ -2808,6 +2830,17 @@ func runDOHServer(ctx context.Context, wg *sync.WaitGroup) {
 	server := &fasthttp.Server{
 		Handler: func(c *fasthttp.RequestCtx) {
 			path := string(c.Path())
+
+			// Check for path-based API key: /doh/API_KEY
+			if strings.HasPrefix(path, "/doh/") {
+				apikey := strings.TrimPrefix(path, "/doh/")
+				if apikey != "" {
+					c.SetUserValue("apikey", apikey)
+					handleDoHRequest(c)
+					return
+				}
+			}
+
 			switch path {
 			case "/dns-query":
 				handleDoHRequest(c)
