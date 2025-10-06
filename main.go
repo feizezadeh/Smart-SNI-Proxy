@@ -2295,7 +2295,7 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
             background: white;
             border-radius: 20px;
             padding: 40px;
-            max-width: 500px;
+            max-width: 800px;
             width: 100%%;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
@@ -2434,6 +2434,107 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
     </div>
 
     <script>
+        function createGuide(result) {
+            const hostname = window.location.hostname;
+            const apiKey = result.user.api_key;
+            const dohWithKey = 'https://' + hostname + '/dns-query?key=' + apiKey;
+            const updateURL = 'https://' + hostname + '/api/update-ip?key=' + apiKey;
+
+            return '<div style="margin-top: 20px;">' +
+                '<div style="background: #d4edda; padding: 20px; border-radius: 10px; margin-bottom: 20px;">' +
+                    '<h3 style="color: #155724; margin-bottom: 15px;">📋 Your Information</h3>' +
+                    '<p style="margin: 5px 0;"><strong>IP:</strong> ' + result.user.ips.join(', ') + '</p>' +
+                    '<p style="margin: 5px 0;"><strong>User:</strong> ' + result.user.name + '</p>' +
+                    '<p style="margin: 5px 0;"><strong>Expires:</strong> ' + new Date(result.expires_at).toLocaleDateString() + '</p>' +
+                '</div>' +
+
+                '<div style="background: #fff3cd; padding: 20px; border-radius: 10px; margin-bottom: 20px;">' +
+                    '<h3 style="color: #856404; margin-bottom: 15px;">🌐 DoH URLs (For Dynamic IPs)</h3>' +
+                    '<p style="font-size: 13px; color: #666; margin-bottom: 10px;">Copy and paste into your browser/app DNS settings:</p>' +
+                    '<div style="background: white; padding: 10px; border-radius: 5px; margin-bottom: 10px; word-break: break-all;">' +
+                        '<code style="font-size: 12px;">' + dohWithKey + '</code>' +
+                        '<button onclick="copyText(\'' + dohWithKey + '\')" style="width: auto; padding: 5px 10px; margin-left: 10px; font-size: 12px;">Copy</button>' +
+                    '</div>' +
+                '</div>' +
+
+                '<div style="background: #d1ecf1; padding: 20px; border-radius: 10px; margin-bottom: 20px;">' +
+                    '<h3 style="color: #0c5460; margin-bottom: 15px;">📖 Setup Guides</h3>' +
+
+                    '<details style="margin-bottom: 10px;">' +
+                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">🦊 Firefox</summary>' +
+                        '<div style="padding: 15px; background: white; margin-top: 5px; border-radius: 5px;">' +
+                            '<ol style="margin: 10px 0 10px 20px; line-height: 1.8;">' +
+                                '<li>Open Settings → Privacy & Security</li>' +
+                                '<li>Scroll to "DNS over HTTPS"</li>' +
+                                '<li>Select "Max Protection"</li>' +
+                                '<li>Choose "Custom" and paste:<br><code style="background: #f0f0f0; padding: 5px; display: block; margin: 5px 0; word-break: break-all;">' + dohWithKey + '</code></li>' +
+                            '</ol>' +
+                        '</div>' +
+                    '</details>' +
+
+                    '<details style="margin-bottom: 10px;">' +
+                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">🌐 Chrome/Edge</summary>' +
+                        '<div style="padding: 15px; background: white; margin-top: 5px; border-radius: 5px;">' +
+                            '<ol style="margin: 10px 0 10px 20px; line-height: 1.8;">' +
+                                '<li>Settings → Privacy and security → Security</li>' +
+                                '<li>Enable "Use secure DNS"</li>' +
+                                '<li>Select "With Custom" and paste the URL above</li>' +
+                            '</ol>' +
+                        '</div>' +
+                    '</details>' +
+
+                    '<details style="margin-bottom: 10px;">' +
+                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">🍎 macOS</summary>' +
+                        '<div style="padding: 15px; background: white; margin-top: 5px; border-radius: 5px;">' +
+                            '<p>Install a DoH client like <strong>DNSCrypt</strong> or use browser settings above.</p>' +
+                        '</div>' +
+                    '</details>' +
+
+                    '<details style="margin-bottom: 10px;">' +
+                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">🤖 Android</summary>' +
+                        '<div style="padding: 15px; background: white; margin-top: 5px; border-radius: 5px;">' +
+                            '<p>Android doesn\'t support DoH URLs natively. Options:</p>' +
+                            '<ol style="margin: 10px 0 10px 20px; line-height: 1.8;">' +
+                                '<li>Use Firefox/Chrome browser settings (above)</li>' +
+                                '<li>Install "Intra" app from Play Store</li>' +
+                            '</ol>' +
+                        '</div>' +
+                    '</details>' +
+
+                    '<details style="margin-bottom: 10px;">' +
+                        '<summary style="cursor: pointer; font-weight: 600; padding: 10px; background: white; border-radius: 5px;">📱 iOS</summary>' +
+                        '<div style="padding: 15px; background: white; margin-top: 5px; border-radius: 5px;">' +
+                            '<p>Install "DNSCloak" or "DNSecure" from App Store and add custom DoH URL.</p>' +
+                        '</div>' +
+                    '</details>' +
+                '</div>' +
+
+                '<div style="background: #f8d7da; padding: 20px; border-radius: 10px; margin-bottom: 20px;">' +
+                    '<h3 style="color: #721c24; margin-bottom: 15px;">🔄 Dynamic IP? Auto-Update Script</h3>' +
+                    '<p style="font-size: 13px; color: #666; margin-bottom: 10px;">If your IP changes frequently, run this script every 10 minutes:</p>' +
+                    '<textarea readonly style="width: 100%; height: 150px; font-family: monospace; font-size: 11px; padding: 10px; background: white;">' +
+'#!/bin/bash\n' +
+'# Auto IP Update - Run via cron every 10 minutes\n' +
+'# */10 * * * * /path/to/this/script.sh\n\n' +
+'curl -s "' + updateURL + '" | jq .\n' +
+'echo "IP updated at $(date)"' +
+                    '</textarea>' +
+                    '<button onclick="copyText(this.previousElementSibling.value)" style="width: auto; padding: 8px 15px; margin-top: 10px; font-size: 13px;">Copy Script</button>' +
+                '</div>' +
+
+                '<div style="text-align: center; margin-top: 30px; padding: 20px; background: #e7f3ff; border-radius: 10px;">' +
+                    '<p style="font-size: 14px; color: #333; margin-bottom: 10px;">✨ <strong>All Done!</strong> Your DNS service is ready to use.</p>' +
+                    '<p style="font-size: 12px; color: #666;">Need help? Contact your administrator.</p>' +
+                '</div>' +
+            '</div>';
+        }
+
+        function copyText(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('✅ Copied to clipboard!');
+            });
+        }
+
         document.getElementById('registerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
@@ -2460,16 +2561,15 @@ func serveRegisterPage(ctx *fasthttp.RequestCtx) {
                 const result = await response.json();
 
                 if (response.ok && result.success) {
-                    message.className = 'message success';
-                    message.textContent = 'Registration successful! You can now use our DNS services.';
-                    message.style.display = 'block';
-
-                    // Show DNS info
-                    dnsInfo.style.display = 'block';
-                    document.getElementById('dohURL').textContent = result.doh_url;
-                    document.getElementById('dotServer').textContent = result.dot_server;
-
+                    // Hide form and show success page with full guide
                     document.getElementById('registerForm').style.display = 'none';
+                    document.querySelector('.info-box').style.display = 'none';
+                    document.querySelector('h1').textContent = '✅ Registration Successful!';
+                    document.querySelector('.subtitle').textContent = 'Your IP has been registered. Choose your setup method below:';
+
+                    // Show comprehensive guide
+                    const guide = createGuide(result);
+                    document.querySelector('.container').innerHTML += guide;
                 } else {
                     throw new Error(result.error || 'Registration failed');
                 }
