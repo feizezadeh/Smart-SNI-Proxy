@@ -1,12 +1,10 @@
-// Web Panel Enhancements
-// این فایل قابلیت‌های جدید را به پنل اضافه می‌کند
+// Smart SNI Web Panel Enhancements
+// Adds Settings panel and registration link features
 
 (function() {
     'use strict';
 
-    // ========== Override displayUsers to show register links ==========
-    const originalDisplayUsers = window.displayUsers;
-
+    // ========== Override displayUsers to add Registration Links ==========
     window.displayUsers = function(users) {
         const container = document.getElementById('usersList');
 
@@ -28,13 +26,11 @@
             const statusText = user.is_active && !isExpired ? 'Active' : 'Inactive';
             const expiryDate = new Date(user.expires_at).toLocaleDateString();
 
-            // Registration link
-            const registerLink = `${window.location.origin}/register?token=${user.id}`;
-
-            // Format IPs list
             const ips = user.ips || [];
             const ipsText = ips.length > 0 ? ips.join('<br>') : '<em style="color: #999;">No IPs yet</em>';
             const ipCount = `${ips.length} / ${user.max_ips}`;
+
+            const registerLink = `${window.location.origin}/register?token=${user.id}`;
 
             html += `<tr style="border-bottom: 1px solid #eee;">
                 <td style="padding: 10px;">
@@ -63,7 +59,7 @@
         container.innerHTML = html;
     };
 
-    // ========== Copy to Clipboard Function ==========
+    // ========== Copy to Clipboard ==========
     window.copyToClipboard = function(text) {
         navigator.clipboard.writeText(text).then(() => {
             showMessage('✅ Link copied to clipboard!', 'success');
@@ -75,13 +71,9 @@
             textarea.style.opacity = '0';
             document.body.appendChild(textarea);
             textarea.select();
-            try {
-                document.execCommand('copy');
-                showMessage('✅ Link copied to clipboard!', 'success');
-            } catch (err) {
-                showMessage('❌ Failed to copy link', 'error');
-            }
+            document.execCommand('copy');
             document.body.removeChild(textarea);
+            showMessage('✅ Link copied to clipboard!', 'success');
         });
     };
 
@@ -89,79 +81,14 @@
     function addSettingsPanel() {
         // Check if already added
         if (document.querySelector('.settings-panel-container')) {
-            console.log('Settings panel already exists');
             return;
         }
 
-        // Find the location to insert settings (before System Info Panel or at end)
-        const contentGrid = document.querySelector('.dashboard-container .content-grid');
-        if (!contentGrid) {
-            console.warn('Content grid not found, trying alternative method');
-            // Try finding any container with panels
-            const dashboardContainer = document.querySelector('.dashboard-container');
-            if (!dashboardContainer) {
-                console.error('Dashboard container not found');
-                return;
-            }
-            addSettingsPanelAlternative(dashboardContainer);
+        const dashboard = document.querySelector('.dashboard-container');
+        if (!dashboard) {
             return;
         }
 
-        const settingsHTML = `
-            <div class="panel settings-panel-container" style="grid-column: 1 / -1; margin-top: 20px;">
-                <h2>⚙️ Settings</h2>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
-                    <!-- Change Password -->
-                    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px;">
-                        <h3 style="margin-bottom: 15px; color: #333;">🔒 Change Password</h3>
-                        <div class="form-group">
-                            <label>Current Password:</label>
-                            <input type="password" id="currentPassword" placeholder="Enter current password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
-                        </div>
-                        <div class="form-group">
-                            <label>New Password:</label>
-                            <input type="password" id="newPassword" placeholder="Enter new password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
-                        </div>
-                        <div class="form-group">
-                            <label>Confirm New Password:</label>
-                            <input type="password" id="confirmPassword" placeholder="Confirm new password" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
-                        </div>
-                        <button onclick="changePassword()" class="btn btn-primary" style="width: 100%; margin-top: 10px;">Change Password</button>
-                    </div>
-
-                    <!-- Change Username -->
-                    <div style="padding: 20px; background: #f8f9fa; border-radius: 10px;">
-                        <h3 style="margin-bottom: 15px; color: #333;">👤 Change Username</h3>
-                        <div class="form-group">
-                            <label>Current Password:</label>
-                            <input type="password" id="usernamePassword" placeholder="Enter password to confirm" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
-                        </div>
-                        <div class="form-group">
-                            <label>New Username:</label>
-                            <input type="text" id="newUsername" placeholder="Enter new username" style="width: 100%; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px;">
-                        </div>
-                        <button onclick="changeUsername()" class="btn btn-primary" style="width: 100%; margin-top: 62px;">Change Username</button>
-                        <p style="margin-top: 10px; font-size: 12px; color: #666;">⚠️ You will be logged out after changing username</p>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        // Insert before the last child or append
-        const systemInfoPanel = Array.from(contentGrid.children).find(el =>
-            el.textContent.includes('System Info') || el.querySelector('h2')?.textContent.includes('System Info')
-        );
-
-        if (systemInfoPanel) {
-            systemInfoPanel.insertAdjacentHTML('beforebegin', settingsHTML);
-        } else {
-            contentGrid.insertAdjacentHTML('beforeend', settingsHTML);
-        }
-        console.log('✅ Settings panel added to content grid');
-    }
-
-    // Alternative method to add settings panel
-    function addSettingsPanelAlternative(container) {
         const settingsHTML = `
             <div class="panel settings-panel-container">
                 <h2>⚙️ Settings</h2>
@@ -202,8 +129,8 @@
             </div>
         `;
 
-        container.insertAdjacentHTML('beforeend', settingsHTML);
-        console.log('✅ Settings panel added via alternative method');
+        // Add to dashboard (append to end)
+        dashboard.insertAdjacentHTML('beforeend', settingsHTML);
     }
 
     // ========== Change Password Function ==========
@@ -271,8 +198,9 @@
             return;
         }
 
-        const confirmed = confirm('Are you sure you want to change your username? You will be logged out.');
-        if (!confirmed) return;
+        if (!confirm('⚠️ You will be logged out after changing username. Continue?')) {
+            return;
+        }
 
         try {
             const sessionId = localStorage.getItem('sessionId') || window.sessionId;
@@ -297,7 +225,7 @@
                         localStorage.removeItem('sessionId');
                         window.location.reload();
                     }
-                }, 2000);
+                }, 1500);
             } else {
                 const data = await response.json();
                 showMessage('❌ ' + (data.error || 'Failed to change username'), 'error');
@@ -308,51 +236,65 @@
         }
     };
 
-    // ========== Initialize on page load ==========
-    function initialize() {
-        console.log('Initializing web panel enhancements...');
+    // ========== Show Message Helper ==========
+    function showMessage(message, type) {
+        // Try to use existing alert, or create a temporary one
+        const alertDiv = document.createElement('div');
+        alertDiv.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            background: ${type === 'success' ? '#27ae60' : '#e74c3c'};
+            color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 10000;
+            font-weight: 500;
+            animation: slideIn 0.3s ease;
+        `;
+        alertDiv.textContent = message;
+        document.body.appendChild(alertDiv);
 
-        // Try multiple times with increasing delays
-        let attempts = 0;
-        const maxAttempts = 20;
-
-        const checkDashboard = setInterval(() => {
-            attempts++;
-            const dashboard = document.querySelector('.dashboard-container');
-
-            console.log(`Attempt ${attempts}: Dashboard found = ${!!dashboard}, Display = ${dashboard?.style.display}`);
-
-            if (dashboard && (dashboard.style.display !== 'none' || !dashboard.style.display)) {
-                clearInterval(checkDashboard);
-                console.log('Dashboard detected, adding settings panel...');
-
-                // Try immediately and then with delays
-                addSettingsPanel();
-                setTimeout(() => addSettingsPanel(), 500);
-                setTimeout(() => addSettingsPanel(), 1000);
-                setTimeout(() => addSettingsPanel(), 2000);
-
-                console.log('✅ Web panel enhancements loaded');
-            } else if (attempts >= maxAttempts) {
-                clearInterval(checkDashboard);
-                console.warn('Dashboard not found after maximum attempts, trying alternative method');
-                // Try adding to body as fallback
-                setTimeout(() => {
-                    const body = document.body;
-                    if (body && !document.querySelector('.settings-panel-container')) {
-                        addSettingsPanelAlternative(body);
-                    }
-                }, 1000);
-            }
-        }, 200);
+        setTimeout(() => {
+            alertDiv.style.opacity = '0';
+            alertDiv.style.transition = 'opacity 0.3s';
+            setTimeout(() => alertDiv.remove(), 300);
+        }, 3000);
     }
 
-    // Start initialization when DOM is ready
+    // ========== Initialize ==========
+    function initialize() {
+        // Wait for user to login before adding Settings panel
+        const checkInterval = setInterval(() => {
+            const dashboard = document.querySelector('.dashboard-container');
+            const loginPage = document.getElementById('loginPage');
+
+            // Check if user is logged in (dashboard visible, login hidden)
+            const isDashboardVisible = dashboard && dashboard.style.display === 'block';
+            const isLoginHidden = loginPage && loginPage.style.display === 'none';
+
+            if (isDashboardVisible && isLoginHidden) {
+                clearInterval(checkInterval);
+
+                // Add Settings panel once
+                setTimeout(() => {
+                    addSettingsPanel();
+                    console.log('✅ Settings panel added');
+                }, 500);
+            }
+        }, 300);
+
+        // Stop checking after 15 seconds
+        setTimeout(() => clearInterval(checkInterval), 15000);
+    }
+
+    // Start when DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize);
     } else {
         initialize();
     }
 
-    console.log('Web Panel Enhancements script loaded');
+    console.log('✅ Web Panel Enhancements loaded');
 })();
