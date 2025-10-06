@@ -1555,8 +1555,9 @@ func handleDoHRequest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Check authentication
-	if !checkAuth(ctx) {
+	// Check old token-based authentication (only if user management is disabled)
+	cfg := getConfig()
+	if !cfg.UserManagement && !checkAuth(ctx) {
 		logger.Warn("DoH authentication failed", "client", clientIP)
 		metrics.IncErrors()
 		ctx.Error("Unauthorized", fasthttp.StatusUnauthorized)
