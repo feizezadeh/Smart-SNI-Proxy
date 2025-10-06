@@ -21,5 +21,5 @@
   "web_panel_username": "admin",
   "web_panel_password": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
   "web_panel_port": 8088,
-  "user_management": false
+  "user_management": true
 }
