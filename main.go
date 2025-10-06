@@ -2388,6 +2388,11 @@ func handleRegisterSubmit(ctx *fasthttp.RequestCtx) {
 	// Get client IP
 	clientIP := getClientIP(ctx)
 
+	// Debug log to see what IP we're getting
+	xffHeader := string(ctx.Request.Header.Peek("X-Forwarded-For"))
+	xriHeader := string(ctx.Request.Header.Peek("X-Real-IP"))
+	logger.Info("register IP detection", "clientIP", clientIP, "X-Forwarded-For", xffHeader, "X-Real-IP", xriHeader, "RemoteAddr", ctx.RemoteAddr().String())
+
 	// Add IP to user (with FIFO logic)
 	err := addIPToUser(req.Token, clientIP)
 	if err != nil {
