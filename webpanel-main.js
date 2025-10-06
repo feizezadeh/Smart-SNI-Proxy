@@ -122,6 +122,11 @@ async function loadMetrics() {
     }
 }
 
+// Pagination state
+let currentDomainsPage = 1;
+const domainsPerPage = 5;
+let allDomains = [];
+
 async function loadDomains() {
     try {
         const response = await fetch('/panel/api/domains', {
@@ -130,24 +135,79 @@ async function loadDomains() {
 
         if (response.ok) {
             const data = await response.json();
-            const container = document.getElementById('domainsList');
-
-            if (Object.keys(data.domains).length === 0) {
-                container.innerHTML = '<p style="color: #999; text-align: center; padding: 20px;">No domains configured</p>';
-                return;
-            }
-
-            container.innerHTML = Object.entries(data.domains).map(([domain, ip]) => `
-                <div class="domain-item">
-                    <span class="domain-name">${domain}</span>
-                    <span class="domain-ip">${ip}</span>
-                    <button onclick="removeDomain('${domain}')" class="btn-small btn-danger">Remove</button>
-                </div>
-            `).join('');
+            allDomains = Object.entries(data.domains);
+            displayDomainsPage(currentDomainsPage);
         }
     } catch (error) {
         console.error('Error loading domains:', error);
     }
+}
+
+function displayDomainsPage(page) {
+    const container = document.getElementById('domainsList');
+
+    if (allDomains.length === 0) {
+        container.innerHTML = '<p class="text-muted text-center py-3">No domains configured</p>';
+        return;
+    }
+
+    const totalPages = Math.ceil(allDomains.length / domainsPerPage);
+    const startIndex = (page - 1) * domainsPerPage;
+    const endIndex = startIndex + domainsPerPage;
+    const pageItems = allDomains.slice(startIndex, endIndex);
+
+    let html = '<div class="list-group">';
+    pageItems.forEach(([domain, ip]) => {
+        html += `
+            <div class="list-group-item d-flex justify-content-between align-items-center">
+                <div>
+                    <strong class="text-primary">${domain}</strong>
+                    <br>
+                    <small class="text-muted"><i class="bi bi-arrow-right"></i> ${ip}</small>
+                </div>
+                <button onclick="removeDomain('${domain}')" class="btn btn-danger btn-sm">
+                    <i class="bi bi-trash"></i> Remove
+                </button>
+            </div>
+        `;
+    });
+    html += '</div>';
+
+    // Add pagination
+    if (totalPages > 1) {
+        html += '<nav class="mt-3"><ul class="pagination pagination-sm justify-content-center mb-0">';
+
+        // Previous button
+        html += `<li class="page-item ${page === 1 ? 'disabled' : ''}">
+            <a class="page-link" href="#" onclick="changePage(${page - 1}); return false;">Previous</a>
+        </li>`;
+
+        // Page numbers
+        for (let i = 1; i <= totalPages; i++) {
+            html += `<li class="page-item ${i === page ? 'active' : ''}">
+                <a class="page-link" href="#" onclick="changePage(${i}); return false;">${i}</a>
+            </li>`;
+        }
+
+        // Next button
+        html += `<li class="page-item ${page === totalPages ? 'disabled' : ''}">
+            <a class="page-link" href="#" onclick="changePage(${page + 1}); return false;">Next</a>
+        </li>`;
+
+        html += '</ul></nav>';
+    }
+
+    // Show total count
+    html += `<p class="text-center text-muted small mt-2 mb-0">
+        Showing ${startIndex + 1}-${Math.min(endIndex, allDomains.length)} of ${allDomains.length} domains
+    </p>`;
+
+    container.innerHTML = html;
+}
+
+function changePage(page) {
+    currentDomainsPage = page;
+    displayDomainsPage(page);
 }
 
 async function loadHealth() {
@@ -190,6 +250,7 @@ async function addDomain() {
 
         if (response.ok) {
             document.getElementById('newDomain').value = '';
+            currentDomainsPage = 1; // Reset to first page
             await loadDomains();
         } else {
             const data = await response.json();
@@ -214,6 +275,11 @@ async function removeDomain(domain) {
         });
 
         if (response.ok) {
+            // If current page becomes empty after deletion, go to previous page
+            const totalPages = Math.ceil((allDomains.length - 1) / domainsPerPage);
+            if (currentDomainsPage > totalPages && currentDomainsPage > 1) {
+                currentDomainsPage--;
+            }
             await loadDomains();
         } else {
             const data = await response.json();
