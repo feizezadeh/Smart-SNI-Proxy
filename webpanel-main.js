@@ -275,9 +275,9 @@ function formatUptime(seconds) {
 function showError(elementId, message) {
     const el = document.getElementById(elementId);
     el.textContent = message;
-    el.style.display = 'block';
+    el.classList.remove('d-none');
     setTimeout(() => {
-        el.style.display = 'none';
+        el.classList.add('d-none');
     }, 5000);
 }
 
@@ -393,14 +393,18 @@ async function deleteUser(userId) {
     }
 }
 
-// ========== Dialog Functions ==========
+// ========== Dialog Functions (Bootstrap Modals) ==========
 
 function showCreateUserDialog() {
-    document.getElementById('createUserDialog').style.display = 'flex';
+    const modal = new bootstrap.Modal(document.getElementById('createUserModal'));
+    modal.show();
 }
 
 function closeCreateUserDialog() {
-    document.getElementById('createUserDialog').style.display = 'none';
+    const modal = bootstrap.Modal.getInstance(document.getElementById('createUserModal'));
+    if (modal) {
+        modal.hide();
+    }
     document.getElementById('userName').value = '';
     document.getElementById('userDescription').value = '';
     document.getElementById('userMaxIPs').value = '3';
@@ -457,7 +461,8 @@ async function createUser() {
             document.getElementById('resultUserExpires').textContent = new Date(data.user.expires_at).toLocaleDateString();
 
             closeCreateUserDialog();
-            document.getElementById('userResultDialog').style.display = 'flex';
+            const resultModal = new bootstrap.Modal(document.getElementById('userResultModal'));
+            resultModal.show();
             await loadUsers();
         } else {
             const errorText = await response.text();
@@ -483,5 +488,8 @@ function copyUserLink() {
 }
 
 function closeUserResultDialog() {
-    document.getElementById('userResultDialog').style.display = 'none';
+    const modal = bootstrap.Modal.getInstance(document.getElementById('userResultModal'));
+    if (modal) {
+        modal.hide();
+    }
 }
