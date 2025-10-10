@@ -651,6 +651,248 @@ func migrateUsersAPIKeys() {
 	}
 }
 
+// ======================== Backup & Restore Functions ========================
+
+// BackupData represents the complete backup structure
+type BackupData struct {
+	Version   string            `json:"version"`
+	Timestamp time.Time         `json:"timestamp"`
+	Config    *Config           `json:"config"`
+	Users     []User            `json:"users"`
+	IPToUser  map[string]string `json:"ip_to_user"` // IP -> UserID mapping
+}
+
+// Create a backup of all users and config
+func createBackup() (*BackupData, error) {
+	cfg := getConfig()
+
+	// Collect all users
+	var userList []User
+	users.Range(func(key, value interface{}) bool {
+		user := value.(*User)
+		userList = append(userList, *user)
+		return true
+	})
+
+	// Collect IP to User mappings
+	ipMapping := make(map[string]string)
+	ipToUser.Range(func(key, value interface{}) bool {
+		ipMapping[key.(string)] = value.(string)
+		return true
+	})
+
+	backup := &BackupData{
+		Version:   "2.0",
+		Timestamp: time.Now(),
+		Config:    cfg,
+		Users:     userList,
+		IPToUser:  ipMapping,
+	}
+
+	return backup, nil
+}
+
+// Save backup to file
+func saveBackupToFile(backup *BackupData, filename string) error {
+	data, err := json.MarshalIndent(backup, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal backup: %w", err)
+	}
+
+	// Create backups directory if it doesn't exist
+	if err := os.MkdirAll("backups", 0755); err != nil {
+		return fmt.Errorf("failed to create backups directory: %w", err)
+	}
+
+	filepath := filepath.Join("backups", filename)
+	if err := os.WriteFile(filepath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write backup file: %w", err)
+	}
+
+	logger.Info("backup saved", "file", filepath, "users", len(backup.Users), "size", len(data))
+	return nil
+}
+
+// Load backup from file
+func loadBackupFromFile(filename string) (*BackupData, error) {
+	filepath := filepath.Join("backups", filename)
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read backup file: %w", err)
+	}
+
+	var backup BackupData
+	if err := json.Unmarshal(data, &backup); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal backup: %w", err)
+	}
+
+	return &backup, nil
+}
+
+// Restore from backup
+func restoreBackup(backup *BackupData, restoreConfig bool) error {
+	// Clear existing users
+	users.Range(func(key, value interface{}) bool {
+		users.Delete(key)
+		return true
+	})
+	ipToUser.Range(func(key, value interface{}) bool {
+		ipToUser.Delete(key)
+		return true
+	})
+
+	// Restore users
+	for _, user := range backup.Users {
+		userCopy := user // Create a copy
+		users.Store(userCopy.ID, &userCopy)
+	}
+
+	// Restore IP mappings
+	for ip, userID := range backup.IPToUser {
+		ipToUser.Store(ip, userID)
+	}
+
+	// Restore config if requested
+	if restoreConfig && backup.Config != nil {
+		config.Store(backup.Config)
+
+		// Update upstream servers
+		dohUpstream.Store(backup.Config.UpstreamDOH)
+
+		// Update auth tokens
+		authTokens.Range(func(key, value interface{}) bool {
+			authTokens.Delete(key)
+			return true
+		})
+		for _, token := range backup.Config.AuthTokens {
+			authTokens.Store(token, true)
+		}
+
+		// Save config to file
+		if err := SaveConfig("config.json", backup.Config); err != nil {
+			return fmt.Errorf("failed to save restored config: %w", err)
+		}
+	}
+
+	logger.Info("backup restored", "users", len(backup.Users), "config_restored", restoreConfig, "timestamp", backup.Timestamp)
+	return nil
+}
+
+// List all available backups
+func listBackups() ([]map[string]interface{}, error) {
+	files, err := os.ReadDir("backups")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+
+	var backups []map[string]interface{}
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		info, err := file.Info()
+		if err != nil {
+			continue
+		}
+
+		// Try to read backup metadata
+		backup, err := loadBackupFromFile(file.Name())
+		var userCount int
+		var timestamp time.Time
+		if err == nil {
+			userCount = len(backup.Users)
+			timestamp = backup.Timestamp
+		} else {
+			timestamp = info.ModTime()
+		}
+
+		backups = append(backups, map[string]interface{}{
+			"filename":  file.Name(),
+			"size":      info.Size(),
+			"timestamp": timestamp,
+			"users":     userCount,
+		})
+	}
+
+	return backups, nil
+}
+
+// Auto-backup scheduler - runs daily
+func startAutoBackup(ctx context.Context) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	// Create initial backup on startup
+	go func() {
+		time.Sleep(5 * time.Second) // Wait for system to fully start
+		filename := fmt.Sprintf("auto_backup_%s.json", time.Now().Format("2006-01-02_15-04-05"))
+		backup, err := createBackup()
+		if err != nil {
+			logger.Error("auto-backup creation failed", "error", err)
+			return
+		}
+		if err := saveBackupToFile(backup, filename); err != nil {
+			logger.Error("auto-backup save failed", "error", err)
+			return
+		}
+		logger.Info("auto-backup created on startup", "file", filename)
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			filename := fmt.Sprintf("auto_backup_%s.json", time.Now().Format("2006-01-02_15-04-05"))
+			backup, err := createBackup()
+			if err != nil {
+				logger.Error("auto-backup creation failed", "error", err)
+				continue
+			}
+			if err := saveBackupToFile(backup, filename); err != nil {
+				logger.Error("auto-backup save failed", "error", err)
+				continue
+			}
+			logger.Info("auto-backup created", "file", filename)
+
+			// Clean old backups (keep last 7 auto-backups)
+			cleanOldBackups()
+		}
+	}
+}
+
+// Clean old auto-backups (keep last 7)
+func cleanOldBackups() {
+	files, err := os.ReadDir("backups")
+	if err != nil {
+		return
+	}
+
+	var autoBackups []os.DirEntry
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), "auto_backup_") && strings.HasSuffix(file.Name(), ".json") {
+			autoBackups = append(autoBackups, file)
+		}
+	}
+
+	// If more than 7 auto-backups, delete oldest
+	if len(autoBackups) > 7 {
+		// Sort by name (which includes timestamp)
+		for i := 0; i < len(autoBackups)-7; i++ {
+			filepath := filepath.Join("backups", autoBackups[i].Name())
+			if err := os.Remove(filepath); err != nil {
+				logger.Warn("failed to delete old backup", "file", autoBackups[i].Name(), "error", err)
+			} else {
+				logger.Info("deleted old backup", "file", autoBackups[i].Name())
+			}
+		}
+	}
+}
+
 func startExpirationChecker(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
@@ -2317,6 +2559,253 @@ func handlePanelChangeUsername(ctx *fasthttp.RequestCtx) {
 	_, _ = ctx.WriteString(`{"success":true,"message":"Username changed successfully"}`)
 }
 
+// ======================== Backup & Restore API Handlers ========================
+
+func handlePanelBackupCreate(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	// Create backup
+	backup, err := createBackup()
+	if err != nil {
+		logger.Error("failed to create backup", "error", err)
+		ctx.Error(`{"error":"Failed to create backup"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Generate filename with timestamp
+	filename := fmt.Sprintf("manual_backup_%s.json", time.Now().Format("2006-01-02_15-04-05"))
+
+	// Save to file
+	if err := saveBackupToFile(backup, filename); err != nil {
+		logger.Error("failed to save backup", "error", err)
+		ctx.Error(`{"error":"Failed to save backup"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("manual backup created via web panel", "file", filename, "users", len(backup.Users))
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success":  true,
+		"filename": filename,
+		"users":    len(backup.Users),
+		"size":     0, // Will be calculated in list
+	})
+}
+
+func handlePanelBackupList(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	backups, err := listBackups()
+	if err != nil {
+		logger.Error("failed to list backups", "error", err)
+		ctx.Error(`{"error":"Failed to list backups"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"backups": backups,
+		"count":   len(backups),
+	})
+}
+
+func handlePanelBackupDownload(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	filename := string(ctx.QueryArgs().Peek("filename"))
+	if filename == "" {
+		ctx.Error(`{"error":"Missing filename parameter"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Security: only allow .json files and prevent directory traversal
+	if !strings.HasSuffix(filename, ".json") || strings.Contains(filename, "..") || strings.Contains(filename, "/") {
+		ctx.Error(`{"error":"Invalid filename"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	filepath := filepath.Join("backups", filename)
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		logger.Warn("backup file not found", "file", filename, "error", err)
+		ctx.Error(`{"error":"Backup file not found"}`, fasthttp.StatusNotFound)
+		return
+	}
+
+	logger.Info("backup downloaded via web panel", "file", filename)
+
+	ctx.SetContentType("application/json")
+	ctx.Response.Header.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.Write(data)
+}
+
+func handlePanelBackupRestore(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		Filename      string `json:"filename"`
+		RestoreConfig bool   `json:"restore_config"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.Filename == "" {
+		ctx.Error(`{"error":"Missing filename"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Security check
+	if strings.Contains(req.Filename, "..") || strings.Contains(req.Filename, "/") {
+		ctx.Error(`{"error":"Invalid filename"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Load backup
+	backup, err := loadBackupFromFile(req.Filename)
+	if err != nil {
+		logger.Error("failed to load backup", "file", req.Filename, "error", err)
+		ctx.Error(`{"error":"Failed to load backup file"}`, fasthttp.StatusNotFound)
+		return
+	}
+
+	// Restore backup
+	if err := restoreBackup(backup, req.RestoreConfig); err != nil {
+		logger.Error("failed to restore backup", "file", req.Filename, "error", err)
+		ctx.Error(`{"error":"Failed to restore backup"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("backup restored via web panel", "file", req.Filename, "users", len(backup.Users), "config_restored", req.RestoreConfig)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success":        true,
+		"users_restored": len(backup.Users),
+		"config_restored": req.RestoreConfig,
+	})
+}
+
+func handlePanelBackupUpload(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	// Get uploaded file
+	fileHeader, err := ctx.FormFile("backup")
+	if err != nil {
+		ctx.Error(`{"error":"No file uploaded"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Security: check file extension
+	if !strings.HasSuffix(fileHeader.Filename, ".json") {
+		ctx.Error(`{"error":"Only JSON files are allowed"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Read file content
+	file, err := fileHeader.Open()
+	if err != nil {
+		ctx.Error(`{"error":"Failed to open uploaded file"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		ctx.Error(`{"error":"Failed to read uploaded file"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Validate JSON structure
+	var backup BackupData
+	if err := json.Unmarshal(data, &backup); err != nil {
+		ctx.Error(`{"error":"Invalid backup file format"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Create backups directory if needed
+	if err := os.MkdirAll("backups", 0755); err != nil {
+		ctx.Error(`{"error":"Failed to create backups directory"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	// Save with timestamp prefix
+	newFilename := fmt.Sprintf("uploaded_%s_%s", time.Now().Format("2006-01-02_15-04-05"), fileHeader.Filename)
+	filepath := filepath.Join("backups", newFilename)
+
+	if err := os.WriteFile(filepath, data, 0644); err != nil {
+		logger.Error("failed to save uploaded backup", "error", err)
+		ctx.Error(`{"error":"Failed to save backup file"}`, fasthttp.StatusInternalServerError)
+		return
+	}
+
+	logger.Info("backup uploaded via web panel", "file", newFilename, "users", len(backup.Users))
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"success":  true,
+		"filename": newFilename,
+		"users":    len(backup.Users),
+	})
+}
+
+func handlePanelBackupDelete(ctx *fasthttp.RequestCtx) {
+	if !requirePanelAuth(ctx) {
+		return
+	}
+
+	var req struct {
+		Filename string `json:"filename"`
+	}
+
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		ctx.Error(`{"error":"Invalid JSON"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	if req.Filename == "" {
+		ctx.Error(`{"error":"Missing filename"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	// Security check
+	if strings.Contains(req.Filename, "..") || strings.Contains(req.Filename, "/") {
+		ctx.Error(`{"error":"Invalid filename"}`, fasthttp.StatusBadRequest)
+		return
+	}
+
+	filepath := filepath.Join("backups", req.Filename)
+	if err := os.Remove(filepath); err != nil {
+		logger.Warn("failed to delete backup", "file", req.Filename, "error", err)
+		ctx.Error(`{"error":"Failed to delete backup file"}`, fasthttp.StatusNotFound)
+		return
+	}
+
+	logger.Info("backup deleted via web panel", "file", req.Filename)
+
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_, _ = ctx.WriteString(`{"success":true}`)
+}
+
 // ======================== Registration Handlers ========================
 
 func serveRegisterPage(ctx *fasthttp.RequestCtx) {
@@ -2855,6 +3344,18 @@ func runWebPanelServer(ctx context.Context, wg *sync.WaitGroup) {
 				handlePanelChangePassword(c)
 			case "/panel/api/settings/change-username":
 				handlePanelChangeUsername(c)
+			case "/panel/api/backup/create":
+				handlePanelBackupCreate(c)
+			case "/panel/api/backup/list":
+				handlePanelBackupList(c)
+			case "/panel/api/backup/download":
+				handlePanelBackupDownload(c)
+			case "/panel/api/backup/restore":
+				handlePanelBackupRestore(c)
+			case "/panel/api/backup/upload":
+				handlePanelBackupUpload(c)
+			case "/panel/api/backup/delete":
+				handlePanelBackupDelete(c)
 			case "/register":
 				serveRegisterPage(c)
 			case "/register/submit":
@@ -2996,6 +3497,11 @@ func main() {
 		// Migrate old users without API keys
 		migrateUsersAPIKeys()
 	}
+
+	// Start auto-backup scheduler
+	go startAutoBackup(ctx)
+	logger.Info("auto-backup scheduler started (runs daily)")
+
 	defer stop()
 
 	// Start all servers
